@@ -8,11 +8,13 @@ import openai
 from agents import function_tool
 
 # Import the Duffel functions (these should already be written and available)
-from map_servers.duffel_server import (
-    search_flights,
-    # get_order,
-    # create_order,
-)
+from map_servers.duffel_server import search_flights
+from map_servers.utils import save_user_flight_decision
+
+TOOL_FUNCTIONS = {
+    "search_flights": search_flights,
+    "save_user_flight_decision": save_user_flight_decision, 
+}
 
 # ----------------------------------------------------------------------
 # 1. Configure OpenAI LLM
@@ -29,6 +31,9 @@ if not OPENAI_API_KEY:
 
 # Set OpenAI API key
 openai.api_key = OPENAI_API_KEY
+
+# Create OpenAI client for newer API
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 # ----------------------------------------------------------------------
 # 2. Tool registry: names -> description + Python callables
@@ -52,32 +57,32 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
                 "max_offers": "integer (optional) - maximum number of flight offers to return (default is 5).",
             },
         },
-        # "get_order": {
-        #     "description": "Retrieve a flight order by its ID.",
-        #     "args": {
-        #         "order_id": "string (required) - the order ID (e.g., 'ord_abc123xyz')."
-        #     },
-        # },
-        # "create_order": {
-        #     "description": "Create a flight order from a selected offer.",
-        #     "args": {
-        #         "offer_id": "string (required) - the offer ID to create an order from.",
-        #         "payment_type": "string (optional) - the payment type (default is 'balance').",
-        #         "passengers": "array (optional) - list of passengers' details (if not provided, falls back to offer passengers).",
-        #         "mode": "string (optional) - either 'instant' (pay now) or 'hold' (create a hold order).",
-        #     },
-        # },
+        "save_user_flight_decision": {
+            "description": "Save the user's flight selection decision to a local JSON file.",
+            "args": {
+                "offer_id": "string (required) - the unique identifier of the flight offer selected by the user.",
+                "origin": "string (required) - the IATA code for the origin airport.",
+                "destination": "string (required) - the IATA code for the destination airport.",
+                "departure_date": "string (required) - the departure date in YYYY-MM-DD format.",
+                "return_date": "string (optional) - the return date in YYYY-MM-DD format, if applicable.",
+                "cabin_class": "string (optional) - the cabin class selected by the user (default is 'economy').",
+                "price": "float (optional) - the price of the selected flight offer (default is 0.0).",
+                "currency": "string (optional) - the currency code for the price (default is 'USD').",
+            },
+        },
     }
 
 TOOL_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "search_flights": search_flights,
-    # "get_order": get_order,
-    # "create_order": create_order,
+    "save_user_flight_decision": save_user_flight_decision
 }
 
 # ----------------------------------------------------------------------
 # 3. Agent logic: decide tool vs direct answer, then explain
 # ----------------------------------------------------------------------
+
+# Initialize the conversation memory list
+conversation_history = []
 
 def build_system_prompt() -> str:
     tools_desc = _tool_schema()
@@ -92,47 +97,56 @@ def build_system_prompt() -> str:
 
     return (
         "You are a flight booking assistant that can call a set of tools (Duffel API functions).\n"
+        "YOU ONLY ANSWER TRAVEL RELATED QUESTIONS!\n"
+        "DONT ANSWER ANYTHING NOT TRAVEL/TOURSIM RELATED!\n"
         "Tools available:\n"
         f"{tools_text}\n\n"
         "You MUST decide if you need to call a tool.\n"
         "If you need a tool, respond ONLY with a JSON object of the form:\n"
         '{\n'
-        '  \"tool\": \"<tool_name>\",\n'
-        '  \"args\": { ... }\n'
+        '  "tool": "<tool_name>",\n'
+        '  "args": { ... }\n'
         '}\n'
         "where <tool_name> is one of the tools above, and args contains only simple JSON types.\n"
         "If you can answer directly without tools (e.g., conceptual explanation), respond ONLY with:\n"
-        '{ \"answer\": \"<your natural language answer>\" }\n'
+        '{ "answer": "<your natural language answer>" }\n'
         "Do not add any extra text outside the JSON. The JSON must be the entire response."
     )
 
 def ask_llm_for_tool_or_answer(user_message: str) -> Dict[str, Any]:
     """
-    Step 1: ask the LLM whether to call a tool, and which one.
-
+    Step 1: Ask the LLM whether to call a tool, and which one.
+    
     Returns parsed JSON dict, either:
       { "answer": "..." }
     or
       { "tool": "<name>", "args": { ... } }
     """
-    system_prompt = build_system_prompt()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
+    # Add current user message to conversation history
+    conversation_history.append({"role": "user", "content": user_message})
 
-    # Using openai.ChatCompletion.create instead of completions.create
-    response = openai.completions.create(
-        model="gpt-5",  # Update to an available model like gpt-3.5-turbo or gpt-4
+    # Build the system prompt to guide the LLM's behavior
+    system_prompt = build_system_prompt()
+
+    # Send the full conversation history + system prompt as context
+    messages = [{"role": "system", "content": system_prompt}] + conversation_history[-10:]  # Limit context to last 10 messages for performance
+
+    # Make the API request with conversation history + system prompt
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",  # Use a valid model
         messages=messages,
         max_tokens=512,
     )
 
-    # Extract response text
-    text = response.choices[0].message["content"].strip()
+    # Extract the response text
+    text = response.choices[0].message.content.strip()
+
+    # Add assistant's response to conversation history
+    conversation_history.append({"role": "assistant", "content": text})
 
     try:
         data = json.loads(text)
+       
     except json.JSONDecodeError:
         # Fallback: wrap whatever the model said as a direct answer
         data = {"answer": text}
@@ -148,6 +162,7 @@ def ask_llm_to_explain_result(
     """
     Step 3: after calling the tool, ask the LLM to explain the result.
     """
+    print(result)
     tool_desc = _tool_schema().get(tool_name, {})
     prompt = (
         "You are a flight booking assistant. A tool has been called on behalf of the user.\n\n"
@@ -166,14 +181,13 @@ def ask_llm_to_explain_result(
         {"role": "user", "content": prompt},
     ]
 
-    response = openai.completions.create(
-        model="gpt-5",  # Use a valid OpenAI model
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",  # Use a valid model
         messages=messages,
         max_tokens=512,
     )
 
-    return response.choices[0].message["content"].strip()
-
+    return response.choices[0].message.content.strip()
 
 def handle_user_message(user_message: str) -> str:
     """
@@ -205,13 +219,12 @@ def handle_user_message(user_message: str) -> str:
 
     return ask_llm_to_explain_result(user_message, tool_name, args, result)
 
-
 # ----------------------------------------------------------------------
 # 4. Simple REPL
 # ----------------------------------------------------------------------
 
 def main() -> None:
-    print(f"Flight Assistant (OpenAI model: gpt-3.5-turbo)")
+    print("Flight Assistant (OpenAI model: gpt-3.5-turbo)")
     print("Type 'quit' or 'exit' to stop.\n")
 
     while True:

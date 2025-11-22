@@ -10,6 +10,6 @@ from .duffel_server import (
 __all__ = [
     "ServerParams",
     "search_flights",
-    # "get_order",
+    "get_order",
     # "create_order",
 ]

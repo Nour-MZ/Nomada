@@ -372,28 +372,26 @@ def cancel_order(order_id: str) -> Dict[str, Any]:
     """Tool wrapper for cancel_order_impl."""
     return cancel_order_impl(order_id=order_id)
 
-@function_tool
-def search_flights(
-    origin: str,
-    destination: str,
-    departure_date: str,
-    return_date: Optional[str] = None,
-    passengers: int = 1,
-    cabin_class: str = "economy",
-    max_offers: int = 5,
-) -> List[Dict[str, Any]]:
-    """Tool wrapper for search_flights_impl."""
-    return search_flights_impl(
-        origin=origin,
-        destination=destination,
-        departure_date=departure_date,
-        return_date=return_date,
-        passengers=passengers,
-        cabin_class=cabin_class,
-        max_offers=max_offers,
-    )
-
-
+# @function_tool
+# def search_flights(
+#     origin: str,
+#     destination: str,
+#     departure_date: str,
+#     return_date: Optional[str] = None,
+#     passengers: int = 1,
+#     cabin_class: str = "economy",
+#     max_offers: int = 5,
+# ) -> List[Dict[str, Any]]:
+#     """Tool wrapper for search_flights_impl."""
+#     return search_flights_impl(
+#         origin=origin,
+#         destination=destination,
+#         departure_date=departure_date,
+#         return_date=return_date,
+#         passengers=passengers,
+#         cabin_class=cabin_class,
+#         max_offers=max_offers,
+#     )
 
 # @function_tool
 # def create_order(
@@ -418,3 +416,5 @@ def get_order(
 ) -> Dict[str, Any]:
     """Tool wrapper for get_order_impl."""
     return get_order_impl(order_id=order_id)
+
+search_flights = search_flights_impl
