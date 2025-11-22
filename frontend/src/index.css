@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-luxury-navy text-luxury-cream font-sans antialiased;
+  }
+}
+
+@layer components {
+  .gradient-text {
+    @apply bg-gradient-to-r from-luxury-gold to-luxury-lightGold bg-clip-text text-transparent;
+  }
+
+  .glass-effect {
+    @apply bg-white/5 backdrop-blur-xl border border-white/10;
+  }
+
+  .luxury-button {
+    @apply relative overflow-hidden px-8 py-3 rounded-full font-medium transition-all duration-300 transform hover:scale-105;
+  }
+
+  .luxury-button::before {
+    content: '';
+    @apply absolute inset-0 bg-gradient-to-r from-luxury-gold/20 to-luxury-lightGold/20 translate-x-full transition-transform duration-300;
+  }
+
+  .luxury-button:hover::before {
+    @apply translate-x-0;
+  }
+
+  .chat-bubble {
+    @apply rounded-3xl px-6 py-4 max-w-[80%] shadow-lg;
+  }
+
+  .scrollbar-luxury::-webkit-scrollbar {
+    @apply w-2;
+  }
+
+  .scrollbar-luxury::-webkit-scrollbar-track {
+    @apply bg-luxury-darkBlue/50 rounded-full;
+  }
+
+  .scrollbar-luxury::-webkit-scrollbar-thumb {
+    @apply bg-luxury-gold/50 rounded-full hover:bg-luxury-gold/70;
+  }
+}
