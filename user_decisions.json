@@ -1,12 +1,12 @@
 {
-    "off_0000B0V6ZEhwjhDM5EIFL0": {
-        "offer_id": "off_0000B0V6ZEhwjhDM5EIFL0",
+    "off_0000B0VGQmpvrtkM03ot9Z": {
+        "offer_id": "off_0000B0VGQmpvrtkM03ot9Z",
         "origin": "BEY",
-        "destination": "LCA",
-        "departure_date": "2025-12-25",
+        "destination": "JFK",
+        "departure_date": "2025-12-26",
         "return_date": null,
         "cabin_class": "economy",
-        "price": 350.0,
+        "price": 604.1,
         "currency": "USD"
     }
 }

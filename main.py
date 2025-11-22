@@ -58,7 +58,7 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
             },
         },
         "save_user_flight_decision": {
-            "description": "Save the user's flight selection decision to a local JSON file.",
+            "description": "Save the user's flight selection/choice/decision to a local JSON file.",
             "args": {
                 "offer_id": "string (required) - the unique identifier of the flight offer selected by the user.",
                 "origin": "string (required) - the IATA code for the origin airport.",
@@ -72,10 +72,7 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
         },
     }
 
-TOOL_FUNCTIONS: Dict[str, Callable[..., Any]] = {
-    "search_flights": search_flights,
-    "save_user_flight_decision": save_user_flight_decision
-}
+# Removed duplicate TOOL_FUNCTIONS definition
 
 # ----------------------------------------------------------------------
 # 3. Agent logic: decide tool vs direct answer, then explain
@@ -113,6 +110,16 @@ def build_system_prompt() -> str:
         "Do not add any extra text outside the JSON. The JSON must be the entire response."
     )
 
+def load_prompt_from_file(prompt_key: str, file_path: str = 'prompts.json') -> str:
+    try:
+        with open(file_path, 'r') as f:
+            prompts = json.load(f)
+        return prompts.get(prompt_key, "")
+    except FileNotFoundError:
+        raise Exception(f"Prompt file '{file_path}' not found.")
+    except json.JSONDecodeError:
+        raise Exception(f"Error decoding JSON from the prompt file.")
+
 def ask_llm_for_tool_or_answer(user_message: str) -> Dict[str, Any]:
     """
     Step 1: Ask the LLM whether to call a tool, and which one.
@@ -146,48 +153,58 @@ def ask_llm_for_tool_or_answer(user_message: str) -> Dict[str, Any]:
 
     try:
         data = json.loads(text)
-       
+
     except json.JSONDecodeError:
         # Fallback: wrap whatever the model said as a direct answer
         data = {"answer": text}
 
     return data
 
-def ask_llm_to_explain_result(
+
+def llm_post_tool_response(
     user_message: str,
     tool_name: str,
     args: Dict[str, Any],
     result: Any,
+    prompt_key: str = "explain_decision",
+    prompt_file: str = "prompts.json"
 ) -> str:
     """
-    Step 3: after calling the tool, ask the LLM to explain the result.
+    Step 3: After calling the tool, ask the LLM to explain the result.
     """
-    print(result)
+    prompter = load_prompt_from_file(prompt_key, prompt_file)
+   
+    if not prompter:
+        raise ValueError(f"No prompt found with key '{prompt_key}' in {prompt_file}")
+    
+    # Pre-process variables
     tool_desc = _tool_schema().get(tool_name, {})
-    prompt = (
-        "You are a flight booking assistant. A tool has been called on behalf of the user.\n\n"
-        f"User message:\n{user_message}\n\n"
-        f"Tool used: {tool_name}\n"
-        f"Tool description: {tool_desc.get('description', '')}\n"
-        f"Arguments: {json.dumps(args, indent=2)}\n\n"
-        f"Raw tool result (JSON):\n{json.dumps(result, indent=2)}\n\n"
-        "Now explain the result to the user in clear natural language. "
-        "Summarize key details of the flight offers, order status, or payment if applicable. "
-        "Do not show the raw JSON, just a human-readable explanation."
+    tool_description = tool_desc.get('description', '') if isinstance(tool_desc, dict) else ''
+    
+    # ✅ FIX: Actually format the prompt with the variables
+    formatted_prompt = prompter.format(
+        user_message=user_message,
+        tool_name=tool_name,
+        tool_description=tool_description,
+        formatted_args=json.dumps(args, indent=2),
+        formatted_result=json.dumps(result, indent=2)
     )
-
-    messages = [
-        {"role": "system", "content": "You are a helpful flight booking assistant."},
-        {"role": "user", "content": prompt},
+    
+    messages = [{"role": "system", "content": "You are a helpful flight booking assistant."}] + conversation_history[-10:] + [
+        {"role": "user", "content": formatted_prompt},  # ✅ Use formatted_prompt, not raw prompter
     ]
 
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",  # Use a valid model
+        model="gpt-3.5-turbo",
         messages=messages,
         max_tokens=512,
     )
 
-    return response.choices[0].message.content.strip()
+    text = response.choices[0].message.content.strip()
+    # ❌ REMOVE this print to avoid duplicate output
+    # print ("this is the text habibi", text)
+    conversation_history.append({"role": "assistant", "content": text})
+    return text
 
 def handle_user_message(user_message: str) -> str:
     """
@@ -196,7 +213,7 @@ def handle_user_message(user_message: str) -> str:
     2. If tool: run the Python function, then ask LLM to explain result.
     """
     decision = ask_llm_for_tool_or_answer(user_message)
-
+    print("Decision from LLM:", decision)
     # Direct answer path
     if "answer" in decision and "tool" not in decision:
         return decision["answer"]
@@ -216,8 +233,9 @@ def handle_user_message(user_message: str) -> str:
         return f"There was an error calling tool '{tool_name}' with arguments {args}: {e}"
     except Exception as e:
         return f"Tool '{tool_name}' failed with an exception: {e}"
-
-    return ask_llm_to_explain_result(user_message, tool_name, args, result)
+    if tool_name == "search_flights":
+        return llm_post_tool_response(user_message, tool_name, args, result,prompt_key="flight_save", prompt_file="prompts.json")
+    return llm_post_tool_response(user_message, tool_name, args, result)
 
 # ----------------------------------------------------------------------
 # 4. Simple REPL

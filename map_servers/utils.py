@@ -11,11 +11,15 @@ DECISIONS_FILE_PATH = "user_decisions.json"
 def _load_decisions() -> Dict[str, Any]:
     """
     Helper function to load existing user decisions from a local JSON file.
-    Returns an empty dictionary if no data is available.
+    Returns an empty dictionary if no data is available or if JSON is invalid.
     """
     if os.path.exists(DECISIONS_FILE_PATH):
-        with open(DECISIONS_FILE_PATH, "r") as f:
-            return json.load(f)
+        try:
+            with open(DECISIONS_FILE_PATH, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            # If file is empty or invalid, return empty dict
+            return {}
     return {}
 
 
