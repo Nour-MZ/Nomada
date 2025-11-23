@@ -8,5 +8,55 @@
         "cabin_class": "economy",
         "price": 604.1,
         "currency": "USD"
+    },
+    "off_0000B0VKEht0SHBzr6ZUsF": {
+        "offer_id": "off_0000B0VKEht0SHBzr6ZUsF",
+        "origin": "BEY",
+        "destination": "LHR",
+        "departure_date": "2025-12-28",
+        "return_date": null,
+        "cabin_class": "economy",
+        "price": 289.87,
+        "currency": "USD"
+    },
+    "off_0000B0VKWhpHtNSpTeKMFD": {
+        "offer_id": "off_0000B0VKWhpHtNSpTeKMFD",
+        "origin": "BEY",
+        "destination": "LHR",
+        "departure_date": "2025-12-28",
+        "return_date": null,
+        "cabin_class": "economy",
+        "price": 289.87,
+        "currency": "USD"
+    },
+    "off_0000B0VLM7xKVC9PHmbnOc": {
+        "offer_id": "off_0000B0VLM7xKVC9PHmbnOc",
+        "origin": "BEY",
+        "destination": "LHR",
+        "departure_date": "2025-12-28",
+        "return_date": null,
+        "cabin_class": "economy",
+        "price": 289.87,
+        "currency": "USD"
+    },
+    "off_0000B0W0uY3ldOFWMnDawQ": {
+        "offer_id": "off_0000B0W0uY3ldOFWMnDawQ",
+        "origin": "BEY",
+        "destination": "RUH",
+        "departure_date": "2025-12-25",
+        "return_date": null,
+        "cabin_class": "economy",
+        "price": 218.6,
+        "currency": "USD"
+    },
+    "off_0000B0W55fwrNYPwDXkcQc": {
+        "offer_id": "off_0000B0W55fwrNYPwDXkcQc",
+        "origin": "BEY",
+        "destination": "RUH",
+        "departure_date": "2025-12-25",
+        "return_date": null,
+        "cabin_class": "economy",
+        "price": 218.6,
+        "currency": "USD"
     }
 }

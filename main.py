@@ -8,12 +8,38 @@ import openai
 from agents import function_tool
 
 # Import the Duffel functions (these should already be written and available)
-from map_servers.duffel_server import search_flights
+from map_servers.duffel_server import (
+    search_flights,
+    create_order,
+    create_payment,
+    get_order,
+    cancel_order,
+    get_offer,
+    request_order_change_offers,
+    confirm_order_change,
+)
+from map_servers.hotelbeds_server import (
+    search_hotels,
+    book_hotel,
+    get_booking,
+    cancel_booking,
+)
 from map_servers.utils import save_user_flight_decision
 
 TOOL_FUNCTIONS = {
     "search_flights": search_flights,
     "save_user_flight_decision": save_user_flight_decision, 
+    "create_order" : create_order,
+    "create_payment": create_payment,
+    "get_order": get_order,
+    "cancel_order": cancel_order,
+    "get_offer": get_offer,
+    "request_order_change_offers": request_order_change_offers,
+    "confirm_order_change": confirm_order_change,
+    "search_hotels": search_hotels,
+    "book_hotel": book_hotel,
+    "get_booking": get_booking,
+    "cancel_booking": cancel_booking,
 }
 
 # ----------------------------------------------------------------------
@@ -48,13 +74,98 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
         "search_flights": {
             "description": "Search for flight offers based on the provided origin, destination, and dates.",
             "args": {
-                "origin": "string (required) - the IATA code for the origin airport (e.g., 'JFK').",
-                "destination": "string (required) - the IATA code for the destination airport (e.g., 'LHR').",
-                "departure_date": "string (required) - the departure date in YYYY-MM-DD format.",
-                "return_date": "string (optional) - the return date for round-trip flights.",
-                "passengers": "integer (optional) - the number of passengers (default is 1).",
-                "cabin_class": "string (optional) - the cabin class (default is 'economy').",
-                "max_offers": "integer (optional) - maximum number of flight offers to return (default is 5).",
+                "slices": "list of { origin: string, destination: string, departure_date: string (YYYY‑MM‑DD) } (required)",
+                "passengers": "list of { type: string ('adult'/'child'/'infant') or age: integer } (required)",
+                "cabin_class": "string (optional) - 'economy'/'premium_economy'/'business'/'first'",
+                "max_connections": "integer (optional) - maximum number of stops per journey",
+                "max_offers": "integer (optional)"  
+            }
+        },
+        "create_order": {
+            "description": "Create a flight order from a selected offer. Requires passenger identities and contact details.",
+            "args": {
+                "offer_id": "string (required) - the Duffel offer ID (e.g., 'off_12345').",
+                "payment_type": "string (optional) - The payment method to use (default is 'balance').",
+                "passengers": "list (required) - A list of passenger details with id, title, gender, given_name, family_name, born_on, email, phone_number.",
+                "mode": "string (optional) - The order type: 'instant' or 'hold' (default is 'instant').",
+                "create_hold": "boolean (optional) - If True, create a hold order without taking payment (default is False).",
+            },
+        },
+        "create_payment": {
+            "description": "Create a payment for an existing order. Supports balance payments and experimental card payments (via payment_source). If amount/currency are missing, it will use the order total.",
+            "args": {
+                "order_id": "string (required) - Duffel order ID (ord_...).",
+                "amount": "string (optional) - amount to pay; defaults to order total.",
+                "currency": "string (optional) - currency code; defaults to order currency.",
+                "payment_type": "string (optional) - payment method, defaults to 'balance'. Use 'card' when providing payment_source for card payments.",
+                "payment_source": "object (optional) - provider-specific fields (e.g., token/payment_method_id) for non-balance payments.",
+            },
+        },
+        "get_order": {
+            "description": "Fetch order details including passengers, itinerary, and payments.",
+            "args": {
+                "order_id": "string (required) - Duffel order ID (ord_...)."
+            },
+        },
+        "get_offer": {
+            "description": "Fetch detailed offer info including segments, baggage, cabin, fare brand, and pricing.",
+            "args": {
+                "offer_id": "string (required) - Duffel offer ID (off_...)."
+            },
+        },
+        "cancel_order": {
+            "description": "Request and (optionally) confirm cancellation of an order. Returns refund info when available.",
+            "args": {
+                "order_id": "string (required) - Duffel order ID (ord_...).",
+                "auto_confirm": "boolean (optional) - confirm the cancellation immediately, default true.",
+            },
+        },
+        "request_order_change_offers": {
+            "description": "Request change offers for an order (e.g., new dates/routes). Returns priced change offers.",
+            "args": {
+                "order_id": "string (required) - Duffel order ID (ord_...).",
+                "slices": "list (optional) - new journey slices {origin, destination, departure_date} to reprice changes.",
+                "max_offers": "integer (optional) - max change offers to return (default 5).",
+            },
+        },
+        "confirm_order_change": {
+            "description": "Confirm a change offer. If amount/currency are omitted, it will fetch the change offer to fill them.",
+            "args": {
+                "order_change_offer_id": "string (required) - Duffel order change offer ID.",
+                "payment_type": "string (optional) - payment method (default 'balance').",
+                "amount": "string (optional) - change total to pay; defaults from change offer.",
+                "currency": "string (optional) - currency; defaults from change offer.",
+            },
+        },
+        "search_hotels": {
+            "description": "Search hotel availability via Hotelbeds (test environment by default). Use Hotelbeds destination codes (e.g., PMI, BCN, LON).",
+            "args": {
+                "destination_code": "string (required) - Hotelbeds destination code (e.g., 'PMI').",
+                "check_in": "string (required) - check-in date YYYY-MM-DD.",
+                "check_out": "string (required) - check-out date YYYY-MM-DD.",
+                "rooms": "list (optional) - occupancy details, e.g., [{'adults':2,'children':0}] or with paxes.",
+                "limit": "integer (optional) - max hotels to return (default 5).",
+            },
+        },
+        "book_hotel": {
+            "description": "Create a hotel booking via Hotelbeds. Requires rateKey(s) from a search.",
+            "args": {
+                "holder": "object (required) - {name, surname} of lead guest.",
+                "rooms": "list (required) - [{rateKey, paxes: [{roomId, type:'AD'/'CH', name, surname, age}]}].",
+                "client_reference": "string (required) - your booking reference.",
+                "remark": "string (optional) - special notes.",
+            },
+        },
+        "get_booking": {
+            "description": "Retrieve a hotel booking by reference.",
+            "args": {
+                "reference": "string (required) - booking reference returned by Hotelbeds.",
+            },
+        },
+        "cancel_booking": {
+            "description": "Cancel a hotel booking by reference.",
+            "args": {
+                "reference": "string (required) - booking reference returned by Hotelbeds.",
             },
         },
         "save_user_flight_decision": {
@@ -71,7 +182,6 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
             },
         },
     }
-
 # Removed duplicate TOOL_FUNCTIONS definition
 
 # ----------------------------------------------------------------------
@@ -80,6 +190,13 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
 
 # Initialize the conversation memory list
 conversation_history = []
+
+def _truncate(text: str, max_chars: int = 4000) -> str:
+    if text is None:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n... [truncated]"
 
 def build_system_prompt() -> str:
     tools_desc = _tool_schema()
@@ -136,13 +253,13 @@ def ask_llm_for_tool_or_answer(user_message: str) -> Dict[str, Any]:
     system_prompt = build_system_prompt()
 
     # Send the full conversation history + system prompt as context
-    messages = [{"role": "system", "content": system_prompt}] + conversation_history[-10:]  # Limit context to last 10 messages for performance
+    messages = [{"role": "system", "content": system_prompt}] + conversation_history[-10:]  # Limit context to last few messages
 
     # Make the API request with conversation history + system prompt
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",  # Use a valid model
         messages=messages,
-        max_tokens=512,
+        max_tokens=3000,
     )
 
     # Extract the response text
@@ -159,7 +276,6 @@ def ask_llm_for_tool_or_answer(user_message: str) -> Dict[str, Any]:
         data = {"answer": text}
 
     return data
-
 
 def llm_post_tool_response(
     user_message: str,
@@ -186,8 +302,8 @@ def llm_post_tool_response(
         user_message=user_message,
         tool_name=tool_name,
         tool_description=tool_description,
-        formatted_args=json.dumps(args, indent=2),
-        formatted_result=json.dumps(result, indent=2)
+        formatted_args=_truncate(json.dumps(args, indent=2), max_chars=2000),
+        formatted_result=_truncate(json.dumps(result, indent=2), max_chars=4000)
     )
     
     messages = [{"role": "system", "content": "You are a helpful flight booking assistant."}] + conversation_history[-10:] + [
@@ -197,7 +313,7 @@ def llm_post_tool_response(
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=messages,
-        max_tokens=512,
+        max_tokens=3000,
     )
 
     text = response.choices[0].message.content.strip()
@@ -213,7 +329,7 @@ def handle_user_message(user_message: str) -> str:
     2. If tool: run the Python function, then ask LLM to explain result.
     """
     decision = ask_llm_for_tool_or_answer(user_message)
-    print("Decision from LLM:", decision)
+   
     # Direct answer path
     if "answer" in decision and "tool" not in decision:
         return decision["answer"]
@@ -229,10 +345,21 @@ def handle_user_message(user_message: str) -> str:
 
     try:
         result = tool_fn(**args)
+        formatted_result = json.dumps(result, indent=2)
+        # Keep tool result in memory, but cap size to avoid blowing context window
+        max_chars = 500
+        if len(formatted_result) > max_chars:
+            formatted_result = formatted_result[:max_chars] + "\n... [truncated]"
+        # conversation_history.append({"role": "assistant", "content": formatted_result})
+        if tool_name == "search_flights":
+            print(result)
+        # result of the tool call is here
     except TypeError as e:
         return f"There was an error calling tool '{tool_name}' with arguments {args}: {e}"
     except Exception as e:
         return f"Tool '{tool_name}' failed with an exception: {e}"
+    if tool_name == "hotel_search":
+        return llm_post_tool_response(user_message, tool_name, args, result,prompt_key="hotel_search", prompt_file="prompts.json")
     if tool_name == "search_flights":
         return llm_post_tool_response(user_message, tool_name, args, result,prompt_key="flight_save", prompt_file="prompts.json")
     return llm_post_tool_response(user_message, tool_name, args, result)
