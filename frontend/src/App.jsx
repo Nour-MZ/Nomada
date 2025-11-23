@@ -36,6 +36,8 @@ function App() {
   const handleSendMessage = (messageText) => {
     if (!messageText.trim()) return
 
+    let targetChatId = currentChatId
+
     // Create new chat if none exists
     if (!currentChatId) {
       const newChatId = Date.now()
@@ -48,6 +50,7 @@ function App() {
       }
       setChats(prev => [newChat, ...prev])
       setCurrentChatId(newChatId)
+      targetChatId = newChatId
     }
 
     // Add user message
@@ -59,7 +62,7 @@ function App() {
     }
 
     setChats(prev => prev.map(chat => {
-      if (chat.id === currentChatId || chat.id === Date.now()) {
+      if (chat.id === targetChatId) {
         return {
           ...chat,
           messages: [...chat.messages, userMessage],
@@ -82,7 +85,7 @@ function App() {
       }
 
       setChats(prev => prev.map(chat => {
-        if (chat.id === currentChatId) {
+        if (chat.id === targetChatId) {
           return {
             ...chat,
             messages: [...chat.messages, aiMessage],
