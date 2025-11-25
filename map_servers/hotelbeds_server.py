@@ -46,6 +46,7 @@ HOTELBEDS_PARAMS = ServerParams(
         "availability": "/hotel-api/1.0/hotels",
         "booking": "/hotel-api/1.0/bookings",
         "booking_detail": "/hotel-api/1.0/bookings/{reference}",
+        "content_hotels": "/hotel-content-api/1.0/hotels",
     },
 )
 
@@ -74,16 +75,16 @@ def _hotelbeds_headers() -> Optional[Dict[str, str]]:
     }
 
 
-def _allowed_destinations() -> List[str]:
-    """
-    Hotelbeds TEST environment only supports a limited set of destination codes.
-    Allow overriding via HOTELBEDS_TEST_DESTS (comma-separated). Defaults to a
-    handful of known test destinations.
-    """
-    override = os.getenv("HOTELBEDS_TEST_DESTS")
-    if override:
-        return [code.strip().upper() for code in override.split(",") if code.strip()]
-    return ["PMI", "BCN", "LON", "NYC", "PAR", "MAD", "BKK"]
+# def _allowed_destinations() -> List[str]:
+#     """
+#     Hotelbeds TEST environment only supports a limited set of destination codes.
+#     Allow overriding via HOTELBEDS_TEST_DESTS (comma-separated). Defaults to a
+#     handful of known test destinations.
+#     """
+#     override = os.getenv("HOTELBEDS_TEST_DESTS")
+#     if override:
+#         return [code.strip().upper() for code in override.split(",") if code.strip()]
+#     return ["PMI", "BCN", "LON", "NYC", "PAR", "MAD", "BKK"]
 
 
 # ------------------------
@@ -112,12 +113,12 @@ def search_hotels_impl(
     occ = rooms or [{"adults": 2, "children": 0}]
 
     dest_code = destination_code.upper().strip()
-    allowed = _allowed_destinations()
-    if allowed and dest_code not in allowed:
-        return {
-            "error": f"Destination '{dest_code}' not available in Hotelbeds TEST environment",
-            "hint": f"Use one of: {', '.join(allowed)} or set HOTELBEDS_TEST_DESTS to override.",
-        }
+    # allowed = _allowed_destinations()
+    # if allowed and dest_code not in allowed:
+    #     return {
+    #         "error": f"Destination '{dest_code}' not available in Hotelbeds TEST environment",
+    #         "hint": f"Use one of: {', '.join(allowed)} or set HOTELBEDS_TEST_DESTS to override.",
+    #     }
 
     occupancies: List[Dict[str, Any]] = []
     for idx, o in enumerate(occ, start=1):
@@ -208,8 +209,8 @@ def search_hotels_impl(
                 "rooms": h.get("rooms"),
             }
         )
-
-    return {"results": hotels_out, "raw": data}
+    print(hotels_out)
+    return {"results": hotels_out}
 
 
 def book_hotel_impl(
@@ -338,3 +339,48 @@ search_hotels = search_hotels_impl
 book_hotel = book_hotel_impl
 get_booking = get_booking_impl
 cancel_booking = cancel_booking_impl
+
+
+def get_hotel_images_impl(
+    hotel_codes: List[int] | List[str],
+    fields: str = "images",
+    language: str = "ENG",
+) -> Dict[str, Any]:
+    """
+    Fetch hotel content (images) for given hotel codes using Hotelbeds Content API.
+    """
+    headers = _hotelbeds_headers()
+    if not headers:
+        return {"error": "Missing HOTELBEDS_API_KEY or HOTELBEDS_SECRET"}
+
+    codes_param = ",".join(str(c) for c in hotel_codes)
+    params = {
+        "codes": codes_param,
+        "fields": fields,
+        "language": language,
+    }
+    url = HOTELBEDS_PARAMS.base_url + HOTELBEDS_PARAMS.commands["content_hotels"]
+    resp = None
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        payload: Any = {}
+        status = None
+        if resp is not None:
+            status = resp.status_code
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {"text": resp.text}
+        logger.error("Hotelbeds content fetch failed: %s", e)
+        return {"error": f"Content fetch failed: {e}", "status": status, "response": payload}
+
+    data = resp.json().get("hotels", [])
+    images_out: Dict[str, List[Dict[str, Any]]] = {}
+    for h in data:
+        code = h.get("code")
+        imgs = h.get("images", [])
+        images_out[str(code)] = imgs
+
+    return {"hotels": images_out, "raw": data}
