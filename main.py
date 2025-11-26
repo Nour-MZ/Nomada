@@ -6,6 +6,8 @@ from typing import Any, Dict, Callable
 from datetime import datetime
 import openai
 from agents import function_tool
+import smtplib
+from email.message import EmailMessage
 
 # Import the Duffel functions (these should already be written and available)
 from map_servers.flight_server import (
@@ -27,9 +29,8 @@ from map_servers.hotelbeds_server import (
 from map_servers.hotelbeds_store import save_hotel_search_results, save_hotel_images, load_hotel_search
 from map_servers.hotelbeds_server import get_hotel_images_impl
 from map_servers.flight_store import save_flight_choice, load_flight_choices, save_flight_search_results, load_latest_search_offers
-from map_servers.utils import save_user_flight_decision
+from map_servers.utils import send_booking_email
 from booking_store import save_booking, cancel_booking_record
-
 
 # ----------------------------------------------------------------------
 # Dedup cache to avoid repeated create_order on the same offer (per process)
@@ -410,7 +411,8 @@ def handle_user_message(user_message: str) -> str:
                     ref = result.get("order_id") or result.get("booking_reference") or data.get("offer_id")
                     title = f"Flight booking {ref}"
                     print("the title", ref)
-                    save_booking(user_email, "flight", ref=ref, title=title, details=result)
+                    # save_booking(user_email, "flight", ref=ref, title=title, details=result)
+                send_booking_email( result)    
                 print(result)
                 conversation_history.append({"role": "assistant", "content": json.dumps(result)})
                 # Fast-path handled; skip downstream tool invocation by returning early
@@ -489,7 +491,10 @@ def handle_user_message(user_message: str) -> str:
         if tool_name == "search_flights":
             # Return raw flight offer JSON so the caller (e.g., frontend) can display all offers,
             # including those saved to the database, without truncation.
+            print("search flights was used")
             try:
+                if isinstance(result, dict) and result.get("error"):
+                    return llm_post_tool_response(user_message, tool_name, args, result)
                 offers = load_latest_search_offers(db_path="databases/flights.sqlite")
                 if offers:
                     lines = []
@@ -502,7 +507,7 @@ def handle_user_message(user_message: str) -> str:
                 return json.dumps(result, indent=2)
             except Exception:
                 return llm_post_tool_response(user_message, tool_name, args, result)
-                return str(result)
+                
         if tool_name =="generate_passenger_template":
             # Return the passenger template directly to the user
             passenger_template = result.get("passenger_template")
