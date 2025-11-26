@@ -13,7 +13,7 @@ import sys
 from pprint import pprint
 
 sys.path.insert(0, "..")
-from map_servers.duffel_server import search_flights_impl, create_order_impl
+from map_servers.flight_server import search_flights_impl, create_order_impl
 
 
 def demo_search_flights() -> None:

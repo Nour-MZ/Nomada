@@ -209,7 +209,7 @@ def search_hotels_impl(
                 "rooms": h.get("rooms"),
             }
         )
-    print(hotels_out)
+    
     return {"results": hotels_out}
 
 

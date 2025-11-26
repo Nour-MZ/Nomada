@@ -236,7 +236,6 @@ def save_hotel_images(
                 pass
 
     for code, imgs in hotel_images.items():
-        print(code,imgs)
         cur.execute(
             "INSERT OR REPLACE INTO hotel_images (hotel_code, images_json) VALUES (?, ?)",
             (code, json.dumps(imgs)),

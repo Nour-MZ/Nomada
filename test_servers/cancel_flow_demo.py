@@ -19,7 +19,7 @@ from typing import Dict, Any, List
 # Allow running from test_servers/ with repo imports
 sys.path.insert(0, "..")
 
-from map_servers.duffel_server import (
+from map_servers.flight_server import (
     search_flights_impl,
     create_order_impl,
     cancel_order_impl,

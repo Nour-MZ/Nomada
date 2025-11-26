@@ -417,7 +417,7 @@ def main() -> None:
         answer = handle_user_message(user_input)
         print("\nAssistant:\n")
         print(answer)
-        print(conversation_history)
+        
         print("\n---\n")
 
 

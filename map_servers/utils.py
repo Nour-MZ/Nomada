@@ -32,6 +32,7 @@ def _save_decisions(data: Dict[str, Any]) -> None:
 
 
 
+
 def save_user_flight_decision(
     offer_id: str,
     origin: str,

@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Dict, Callable
-
+from datetime import datetime
 import openai
 from agents import function_tool
 
 # Import the Duffel functions (these should already be written and available)
-from map_servers.duffel_server import (
+from map_servers.flight_server import (
     search_flights,
     create_order,
     create_payment,
@@ -26,26 +26,14 @@ from map_servers.hotelbeds_server import (
 )
 from map_servers.hotelbeds_store import save_hotel_search_results, save_hotel_images, load_hotel_search
 from map_servers.hotelbeds_server import get_hotel_images_impl
-from map_servers.flight_store import save_flight_choice, load_flight_choices
+from map_servers.flight_store import save_flight_choice, load_flight_choices, save_flight_search_results, load_latest_search_offers
 from map_servers.utils import save_user_flight_decision
+from booking_store import save_booking, cancel_booking_record
 
-TOOL_FUNCTIONS = {
-    "search_flights": search_flights,
-    "save_user_flight_decision": save_user_flight_decision, 
-    "create_order" : create_order,
-    "create_payment": create_payment,
-    "get_order": get_order,
-    "cancel_order": cancel_order,
-    "get_offer": get_offer,
-    "request_order_change_offers": request_order_change_offers,
-    "confirm_order_change": confirm_order_change,
-    "search_hotels": search_hotels,
-    "book_hotel": book_hotel,
-    "get_booking": get_booking,
-    "cancel_booking": cancel_booking,
-    "save_flight_choice": save_flight_choice,
-    "load_flight_choices": load_flight_choices,
-}
+
+# ----------------------------------------------------------------------
+# Dedup cache to avoid repeated create_order on the same offer (per process)
+_recent_orders: Dict[str, float] = {}
 
 # ----------------------------------------------------------------------
 # 1. Configure OpenAI LLM
@@ -79,11 +67,17 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
         "search_flights": {
             "description": "Search for flight offers based on the provided origin, destination, and dates.",
             "args": {
-                "slices": "list of { origin: string, destination: string, departure_date: string (YYYY‑MM‑DD) } (required)",
+                "slices": "list of { origin: string (IATA Form), destination: string, departure_date: string (YYYY‑MM‑DD) } (required)",
                 "passengers": "list of { type: string ('adult'/'child'/'infant') or age: integer } (required)",
                 "cabin_class": "string (optional) - 'economy'/'premium_economy'/'business'/'first'",
                 "max_connections": "integer (optional) - maximum number of stops per journey",
                 "max_offers": "integer (optional)"  
+            }
+        },
+        "generate_passenger_template": {
+            "description": "Use whenever a user chooses a flight number after getting the `recent flight offers:` message. Run before the create_order function",
+            "args": {
+                "selection": "integer (required) - 1-based index of the flight from the latest search results"
             }
         },
         "create_order": {
@@ -91,7 +85,7 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
             "args": {
                 "offer_id": "string (required) - the Duffel offer ID (e.g., 'off_12345').",
                 "payment_type": "string (optional) - The payment method to use (default is 'balance').",
-                "passengers": "list (required) - A list of passenger details with id, title, gender, given_name, family_name, born_on, email, phone_number.",
+                "passengers": "list (required) - A list of passenger details with id, title, gender type: string ('m'/'f'), given_name, family_name, born_on, email, phone_number.",
                 "mode": "string (optional) - The order type: 'instant' or 'hold' (default is 'instant').",
                 "create_hold": "boolean (optional) - If True, create a hold order without taking payment (default is False).",
             },
@@ -113,7 +107,7 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
             },
         },
         "get_offer": {
-            "description": "Fetch detailed offer info including segments, baggage, cabin, fare brand, and pricing.",
+            "description": "Fetch detailed offer of a flight info including segments, baggage, cabin, fare brand, and pricing.",
             "args": {
                 "offer_id": "string (required) - Duffel offer ID (off_...)."
             },
@@ -187,19 +181,7 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
                 "db_path": "string (optional) - sqlite file path, default flight_choices.sqlite"
             },
         },
-        "save_user_flight_decision": {
-            "description": "Save the user's flight selection/choice/decision to a local JSON file.",
-            "args": {
-                "offer_id": "string (required) - the unique identifier of the flight offer selected by the user.",
-                "origin": "string (required) - the IATA code for the origin airport.",
-                "destination": "string (required) - the IATA code for the destination airport.",
-                "departure_date": "string (required) - the departure date in YYYY-MM-DD format.",
-                "return_date": "string (optional) - the return date in YYYY-MM-DD format, if applicable.",
-                "cabin_class": "string (optional) - the cabin class selected by the user (default is 'economy').",
-                "price": "float (optional) - the price of the selected flight offer (default is 0.0).",
-                "currency": "string (optional) - the currency code for the price (default is 'USD').",
-            },
-        },
+        
     }
 # Removed duplicate TOOL_FUNCTIONS definition
 
@@ -217,6 +199,57 @@ def _truncate(text: str, max_chars: int = 4000) -> str:
         return text
     return text[:max_chars] + "\n... [truncated]"
 
+
+def generate_passenger_template(selection: int, db_path: str = "databases/flights.sqlite") -> Dict[str, Any]:
+    """
+    Return the raw offer for a selected flight index from the most recent search,
+    suitable for prompting the passenger template on the frontend.
+    """
+    offers = load_latest_search_offers(db_path=db_path)
+    if not offers:
+        return {"error": "No recent flight search found"}
+    if selection < 1 or selection > len(offers):
+        return {"error": f"Selection {selection} is out of range", "count": len(offers)}
+    chosen = offers[selection - 1].get("raw") or {}
+
+    # Trim to only the fields needed by the frontend template
+    passengers = []
+    for pax in chosen.get("passengers", []) or []:
+        passengers.append({"id": pax.get("id") or ""})
+    if not passengers:
+        passengers = [{"id": ""}]
+
+    passenger_template = {
+        # Duplicate id for frontend compatibility
+        "id": chosen.get("id"),
+        "offer_id": chosen.get("id"),
+        "passengers": passengers,
+        "required_fields": ["title", "gender", "given_name", "family_name", "born_on", "email", "phone_number", "id"],
+    }
+
+    return {"passenger_template": passenger_template, "selection": selection}
+
+
+TOOL_FUNCTIONS = {
+    "search_flights": search_flights,
+    "generate_passenger_template": generate_passenger_template, 
+    "create_order" : create_order,
+    "create_payment": create_payment,
+    "get_order": get_order,
+    "cancel_order": cancel_order,
+    "get_offer": get_offer,
+    "request_order_change_offers": request_order_change_offers,
+    "confirm_order_change": confirm_order_change,
+    "search_hotels": search_hotels,
+    "book_hotel": book_hotel,
+    "get_booking": get_booking,
+    "cancel_booking": cancel_booking,
+    "save_flight_choice": save_flight_choice,
+    "load_flight_choices": load_flight_choices,
+     # set after definition
+}
+
+
 def build_system_prompt() -> str:
     tools_desc = _tool_schema()
     tools_text_parts = []
@@ -232,6 +265,8 @@ def build_system_prompt() -> str:
         "You are a travel assistant that can call a set of tools (Duffel API functions).\n"
         "YOU ONLY ANSWER TRAVEL RELATED QUESTIONS!\n"
         "DONT ANSWER ANYTHING NOT TRAVEL/TOURSIM RELATED!\n"
+        "If the user provides a flight selection number, you MUST call generate_passenger_template with that number before creating any order.\n"
+        "Do not call create_order until you have collected passenger details via the passenger template.\n"
         "Tools available:\n"
         f"{tools_text}\n\n"
         "You MUST decide if you need to call a tool.\n"
@@ -243,7 +278,8 @@ def build_system_prompt() -> str:
         "where <tool_name> is one of the tools above, and args contains only simple JSON types.\n"
         "If you can answer directly without tools (e.g., conceptual explanation), respond ONLY with:\n"
         '{ "answer": "<your natural language answer>" }\n'
-        "Do not add any extra text outside the JSON. The JSON must be the entire response."
+        "Do not add any extra text outside the JSON. The JSON must be the entire response.\n"
+        f"today is{datetime.now()}"
     )
 
 def load_prompt_from_file(prompt_key: str, file_path: str = 'prompts.json') -> str:
@@ -272,7 +308,7 @@ def ask_llm_for_tool_or_answer(user_message: str) -> Dict[str, Any]:
     system_prompt = build_system_prompt()
 
     # Send the full conversation history + system prompt as context
-    messages = [{"role": "system", "content": system_prompt}] + conversation_history[-10:]  # Limit context to last few messages
+    messages = [{"role": "system", "content": system_prompt}] + conversation_history[-25:]  # Limit context to last few messages
 
     # Make the API request with conversation history + system prompt
     response = client.chat.completions.create(
@@ -325,7 +361,7 @@ def llm_post_tool_response(
         formatted_result=_truncate(json.dumps(result, indent=2), max_chars=4000)
     )
     
-    messages = [{"role": "system", "content": "You are a helpful flight booking assistant."}] + conversation_history[-10:] + [
+    messages = [{"role": "system", "content": "You are a helpful flight booking assistant."}] + conversation_history[-25:] + [
         {"role": "user", "content": formatted_prompt},  # ✅ Use formatted_prompt, not raw prompter
     ]
 
@@ -347,6 +383,58 @@ def handle_user_message(user_message: str) -> str:
     1. Ask LLM whether to use a tool or answer directly.
     2. If tool: run the Python function, then ask LLM to explain result.
     """
+    # Fast-path: if frontend sends structured booking payload, bypass LLM and create order directly
+    try:
+        data = json.loads(user_message)
+        if isinstance(data, dict) and data.get("offer_id") and isinstance(data.get("passengers"), list):
+            order_payload = {
+                "offer_id": data["offer_id"],
+                "passengers": [p for p in data["passengers"] if isinstance(p, dict)],
+                "payment_type": data.get("payment_type", "balance"),
+                "mode": data.get("mode", "instant"),
+                "create_hold": data.get("create_hold", False),
+            }
+            # Dedup guard: avoid rebooking same offer id immediately
+            from time import time
+            now = time()
+            last = _recent_orders.get(order_payload["offer_id"])
+            if last and (now - last) < 120:
+                return f"Order for offer {order_payload['offer_id']} was already submitted recently. Please search again to book a new offer."
+            try:
+                # Record user payload in history for context
+                conversation_history.append({"role": "user", "content": json.dumps(order_payload)})
+                result = create_order(**order_payload)
+                _recent_orders[order_payload["offer_id"]] = now
+                user_email = data.get("user_email") or data.get("email")
+                if user_email:
+                    ref = result.get("order_id") or result.get("booking_reference") or data.get("offer_id")
+                    title = f"Flight booking {ref}"
+                    print("the title", ref)
+                    save_booking(user_email, "flight", ref=ref, title=title, details=result)
+                print(result)
+                conversation_history.append({"role": "assistant", "content": json.dumps(result)})
+                # Fast-path handled; skip downstream tool invocation by returning early
+                return llm_post_tool_response(user_message, "create_order", order_payload, result)
+            except Exception as e:
+                return llm_post_tool_response(user_message, "create_order", order_payload, e)
+        if isinstance(data, dict) and data.get("order_id") and data.get("cancel_booking"):
+            conversation_history.append({"role": "user", "content": json.dumps(data)})
+            result = cancel_order(data["order_id"], auto_confirm=True)
+            user_email = data.get("user_email") or data.get("email")
+            if user_email:
+                try:
+                    cancel_booking_record(user_email, data["order_id"],db_path="databases/bookings.sqlite")
+                except Exception as e:
+                    print(f"Failed to mark booking cancelled: {e}")
+            formatted_result = json.dumps(result, indent=2)
+            if len(formatted_result) > 500:
+                formatted_result = formatted_result[:500] + "\n... [truncated]"
+            conversation_history.append({"role": "assistant", "content": formatted_result})
+            return llm_post_tool_response(user_message, "cancel_order", {"order_id": data["order_id"]}, result)
+    except Exception:
+        # Not a structured booking payload; continue with normal flow
+        pass
+
     decision = ask_llm_for_tool_or_answer(user_message)
    
     # Direct answer path
@@ -398,14 +486,35 @@ def handle_user_message(user_message: str) -> str:
                         print(f"Warning: image fetch error: {images_resp.get('error')}")
             except Exception as image_err:
                 print(f"Warning: failed to fetch/save hotel images: {image_err}")
+        if tool_name == "search_flights":
+            # Return raw flight offer JSON so the caller (e.g., frontend) can display all offers,
+            # including those saved to the database, without truncation.
+            try:
+                offers = load_latest_search_offers(db_path="databases/flights.sqlite")
+                if offers:
+                    lines = []
+                    for idx, offer in enumerate(offers, start=1):
+                        pax_str = ", ".join(offer.get("passenger_ids") or []) or "n/a"
+                        lines.append(f"{idx}. offer_id={offer.get('offer_id')} passengers=[{pax_str}]")
+                    summary = "Recent flight offers:\n" + "\n".join(lines)
+                    print(summary)
+                    conversation_history.append({"role": "assistant", "content": summary})
+                return json.dumps(result, indent=2)
+            except Exception:
+                return llm_post_tool_response(user_message, tool_name, args, result)
+                return str(result)
+        if tool_name =="generate_passenger_template":
+            # Return the passenger template directly to the user
+            passenger_template = result.get("passenger_template")
+            if passenger_template:
+                return json.dumps(passenger_template, indent=2)
+            else:
+                return f"Error generating passenger template: {result.get('error', 'unknown error')}"
     except TypeError as e:
         return f"There was an error calling tool '{tool_name}' with arguments {args}: {e}"
     except Exception as e:
         return f"Tool '{tool_name}' failed with an exception: {e}"
-    if tool_name == "search_flights":
-        return llm_post_tool_response(user_message, tool_name, args, result,prompt_key="flight_save", prompt_file="prompts.json")
     return llm_post_tool_response(user_message, tool_name, args, result)
-
 # ----------------------------------------------------------------------
 # 4. Simple REPL
 # ----------------------------------------------------------------------
@@ -431,7 +540,7 @@ def main() -> None:
         answer = handle_user_message(user_input)
         print("\nAssistant:\n")
         print(answer)
-        print(conversation_history)
+        
         print("\n---\n")
 
 

@@ -2,7 +2,7 @@
 
 from .base import ServerParams
 
-from .duffel_server import (
+from .flight_server import (
     search_flights,
     create_order,
     create_payment,
