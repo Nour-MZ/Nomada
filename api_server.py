@@ -20,6 +20,8 @@ from pydantic import BaseModel
 import main as backend  # reuse handle_user_message and globals
 from user_store import create_user, authenticate, get_user
 from booking_store import list_bookings, cancel_booking_record
+from payment_gateway import create_payment_intent, confirm_payment_intent, retrieve_payment_intent
+from payment_store import save_payment, get_payment_by_intent_id, get_payment_by_order_id
 
 app = FastAPI(title="Nomada Chat API")
 
@@ -65,6 +67,26 @@ class BookingsResponse(BaseModel):
 class CancelRequest(BaseModel):
     email: str
     order_id: str
+
+class CreatePaymentIntentRequest(BaseModel):
+    amount: str
+    currency: str
+    offer_id: str
+    customer_email: str | None = None
+
+class PaymentIntentResponse(BaseModel):
+    success: bool
+    client_secret: str | None = None
+    payment_intent_id: str | None = None
+    error: str | None = None
+
+class ConfirmPaymentRequest(BaseModel):
+    payment_intent_id: str
+
+class PaymentDetailsResponse(BaseModel):
+    success: bool
+    payment: dict | None = None
+    error: str | None = None
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
@@ -130,6 +152,85 @@ def cancel_booking(req: CancelRequest) -> AuthResponse:
         return AuthResponse(success=True, message="Booking marked as cancelled")
     except Exception as e:
         return AuthResponse(success=False, message=f"Cancel failed: {e}")
+
+
+@app.post("/payments/create-intent", response_model=PaymentIntentResponse)
+def create_payment(req: CreatePaymentIntentRequest) -> PaymentIntentResponse:
+    """
+    Create a Stripe PaymentIntent for collecting payment before booking.
+    Frontend will use client_secret to collect card details securely.
+    """
+    try:
+        result = create_payment_intent(
+            amount=req.amount,
+            currency=req.currency,
+            offer_id=req.offer_id,
+            customer_email=req.customer_email
+        )
+
+        # Save payment record to database
+        save_payment(
+            stripe_payment_intent_id=result['payment_intent_id'],
+            amount=req.amount,
+            currency=req.currency,
+            status=result['status'],
+            offer_id=req.offer_id,
+            customer_email=req.customer_email
+        )
+
+        return PaymentIntentResponse(
+            success=True,
+            client_secret=result['client_secret'],
+            payment_intent_id=result['payment_intent_id']
+        )
+
+    except Exception as e:
+        return PaymentIntentResponse(success=False, error=str(e))
+
+
+@app.post("/payments/confirm", response_model=PaymentDetailsResponse)
+def confirm_payment(req: ConfirmPaymentRequest) -> PaymentDetailsResponse:
+    """
+    Confirm that a payment was successful and retrieve details.
+    Should be called after frontend confirms payment with Stripe.
+    """
+    try:
+        payment_details = confirm_payment_intent(req.payment_intent_id)
+
+        # Update payment record with card details
+        card_info = payment_details.get('card', {})
+        save_payment(
+            stripe_payment_intent_id=req.payment_intent_id,
+            amount=str(payment_details['amount']),
+            currency=payment_details['currency'],
+            status='succeeded',
+            card_brand=card_info.get('brand'),
+            card_last4=card_info.get('last4')
+        )
+
+        return PaymentDetailsResponse(success=True, payment=payment_details)
+
+    except Exception as e:
+        return PaymentDetailsResponse(success=False, error=str(e))
+
+
+@app.get("/payments/{payment_intent_id}", response_model=PaymentDetailsResponse)
+def get_payment(payment_intent_id: str) -> PaymentDetailsResponse:
+    """
+    Retrieve payment details from database or Stripe.
+    """
+    try:
+        # Check database first
+        db_payment = get_payment_by_intent_id(payment_intent_id)
+        if db_payment:
+            return PaymentDetailsResponse(success=True, payment=db_payment)
+
+        # Fall back to Stripe
+        payment_details = retrieve_payment_intent(payment_intent_id)
+        return PaymentDetailsResponse(success=True, payment=payment_details)
+
+    except Exception as e:
+        return PaymentDetailsResponse(success=False, error=str(e))
 
 
 if __name__ == "__main__":

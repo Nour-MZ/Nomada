@@ -29,6 +29,8 @@ from map_servers.hotelbeds_store import load_hotel_search
 from map_servers.flight_store import save_flight_choice, load_flight_choices, save_flight_search_results, load_latest_search_offers
 from map_servers.utils import send_booking_email
 from booking_store import save_booking, cancel_booking_record
+from payment_gateway import confirm_payment_intent
+from payment_store import link_payment_to_order, get_payment_by_intent_id
 
 # ----------------------------------------------------------------------
 # Dedup cache to avoid repeated create_order on the same offer (per process)
@@ -1006,6 +1008,30 @@ def handle_user_message(user_message: str) -> str:
     try:
         data = json.loads(user_message)
         if isinstance(data, dict) and data.get("offer_id") and isinstance(data.get("passengers"), list):
+            # Check if Stripe payment verification is required
+            stripe_payment_intent_id = data.get("stripe_payment_intent_id")
+
+            if stripe_payment_intent_id:
+                # Verify the Stripe payment was successful before creating order
+                try:
+                    payment_details = confirm_payment_intent(stripe_payment_intent_id)
+                    if payment_details.get("status") != "succeeded":
+                        return json.dumps({
+                            "error": "Payment not completed",
+                            "message": f"Payment status is '{payment_details.get('status')}'. Please complete payment before booking.",
+                            "payment_intent_id": stripe_payment_intent_id
+                        }, indent=2)
+
+                    # Payment verified - proceed with order using balance (customer already paid us via Stripe)
+                    print(f"Payment verified: {payment_details['amount']} {payment_details['currency']} via Stripe")
+
+                except Exception as pay_err:
+                    return json.dumps({
+                        "error": "Payment verification failed",
+                        "message": str(pay_err),
+                        "payment_intent_id": stripe_payment_intent_id
+                    }, indent=2)
+
             order_payload = {
                 "offer_id": data["offer_id"],
                 "passengers": [p for p in data["passengers"] if isinstance(p, dict)],
@@ -1039,13 +1065,22 @@ def handle_user_message(user_message: str) -> str:
                 conversation_history.append({"role": "user", "content": json.dumps(order_payload)})
                 result = create_order(**order_payload)
                 _recent_orders[order_payload["offer_id"]] = now
+
+                # Link Stripe payment to created order
+                if stripe_payment_intent_id and result.get("order_id"):
+                    try:
+                        link_payment_to_order(stripe_payment_intent_id, result["order_id"])
+                        print(f"Linked payment {stripe_payment_intent_id} to order {result['order_id']}")
+                    except Exception as link_err:
+                        print(f"Failed to link payment to order: {link_err}")
+
                 user_email = data.get("user_email") or data.get("email")
                 if user_email:
                     ref = result.get("order_id") or result.get("booking_reference") or data.get("offer_id")
                     title = f"Flight booking {ref}"
                     print("the title", ref)
                     # save_booking(user_email, "flight", ref=ref, title=title, details=result)
-                send_booking_email( result)    
+                send_booking_email( result)
                 print(result)
                 conversation_history.append({"role": "assistant", "content": json.dumps(result)})
                 # Fast-path handled; skip downstream tool invocation by returning early
