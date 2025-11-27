@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import ServerParams
+from .hotelbeds_store import save_hotel_images, save_hotel_search_results
 
 from dotenv import load_dotenv
 
@@ -250,8 +251,44 @@ def search_hotels_impl(
                 "facilities": facility_names,
             }
         )
-    
-    return {"results": hotels_out}
+
+    result = {"results": hotels_out}
+
+    # Persist search results and related images for later retrieval
+    try:
+        # Late import to avoid NameError if module import fails in some environments
+        from .hotelbeds_store import save_hotel_images as _save_images, save_hotel_search_results as _save_results
+    except Exception as import_err:
+        logger.warning("Hotelbeds persistence helpers unavailable: %s", import_err)
+        _save_results = None
+        _save_images = None
+
+    if _save_results:
+        try:
+            search_id = _save_results(
+                result,
+                destination=destination_code,
+                check_in=check_in,
+                check_out=check_out,
+                db_path="databases/hotelbeds.sqlite",
+            )
+            result["search_id"] = search_id
+        except Exception as persist_err:
+            logger.warning("Failed to save hotel search results: %s", persist_err)
+
+    if _save_images:
+        try:
+            hotel_codes = [h.get("code") for h in hotels_out if h.get("code") is not None]
+            if hotel_codes:
+                images_resp = get_hotel_images_impl(hotel_codes)
+                if not images_resp.get("error"):
+                    _save_images(images_resp.get("hotels", {}), "databases/hotelbeds.sqlite", attach_to_rates=True)
+                else:
+                    logger.warning("Hotel image fetch returned error: %s", images_resp.get("error"))
+        except Exception as image_err:
+            logger.warning("Failed to fetch/save hotel images: %s", image_err)
+
+    return result
 
 
 def book_hotel_impl(

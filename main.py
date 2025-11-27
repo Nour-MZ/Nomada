@@ -24,12 +24,9 @@ from map_servers.hotelbeds_server import (
     get_booking,
     cancel_booking,
 )
-from map_servers.hotelbeds_store import save_hotel_search_results, save_hotel_images, load_hotel_search
-from map_servers.hotelbeds_server import get_hotel_images_impl
+from map_servers.hotelbeds_store import load_hotel_search
 from map_servers.flight_store import save_flight_choice, load_flight_choices, save_flight_search_results, load_latest_search_offers
 from map_servers.utils import send_booking_email
-from map_servers.hotelbeds_store import load_hotel_search
-from booking_store import save_booking, cancel_booking_record
 from booking_store import save_booking, cancel_booking_record
 
 # ----------------------------------------------------------------------
@@ -356,30 +353,7 @@ def plan_trip_first(
         print(f"plan_trip_first: flight search failed {e}")
         print("Test3")
 
-    check_out= return_date if return_date else (dep + timedelta(days=3)).isoformat() if dep else departure_date,
-
-    try:
-        print(departure_date)
-        print(return_date if return_date else (dep + timedelta(days=3)).isoformat() if dep else departure_date)
-        print(destination.upper())
-        
-
-        hotelresults = search_hotels(
-            destination_code=destination.upper(),
-            check_in=departure_date,
-            check_out= check_out,
-            # rooms = [{"adults": 2, "children": 0}],
-            limit=5,
-        )
-        save_hotel_search_results(
-                    hotelresults,
-                    destination=destination.upper(),
-                    check_in=departure_date,
-                    check_out=check_out,
-                )
-        print("test5")
-    except Exception as e:
-        print(f"plan_trip_first: hotel search failed {e}")
+    
 
     flights = load_latest_search_offers(db_path="databases/flights.sqlite")
     best_flight = None
@@ -394,6 +368,42 @@ def plan_trip_first(
             "departure_date": departure_date,
         }
     print("Test4")
+
+    def _arrival_date_from_flight(raw_flight: Dict[str, Any]) -> Optional[str]:
+        """Pick the arrival date of the last segment in the first slice, as YYYY-MM-DD."""
+        try:
+            slices = raw_flight.get("slices") or []
+            if not slices:
+                return None
+            last_seg = (slices[0].get("segments") or [])[-1]
+            arriving_at = last_seg.get("arriving_at")
+            if not arriving_at:
+                return None
+            # Normalize ISO strings with trailing Z for fromisoformat
+            ts = arriving_at.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts)
+            return dt.date().isoformat()
+        except Exception:
+            return None
+
+    try:
+        # Align hotel check-in with flight arrival date instead of departure date
+        flight_arrival_date = _arrival_date_from_flight(best_flight) or departure_date
+        check_in = flight_arrival_date
+        check_out = return_date or (
+            datetime.fromisoformat(check_in).date() + timedelta(days=3)
+        ).isoformat()
+
+        hotelresults = search_hotels(
+            destination_code=destination.upper(),
+            check_in=check_in,
+            check_out=check_out,
+            # rooms = [{"adults": 2, "children": 0}],
+            limit=5,
+        )
+    except Exception as e:
+        print(f"plan_trip_first: hotel search failed {e}")
+        
     hotels = []
     try:
         loaded = load_hotel_search(db_path="databases/hotelbeds.sqlite")
@@ -675,33 +685,6 @@ def handle_user_message(user_message: str) -> str:
         conversation_history.append({"role": "assistant", "content": formatted_result})
         print(result)
         if tool_name == "search_hotels":
-            # Persist hotel search results for later retrieval
-            print("hotel results", result)
-            try:
-                save_hotel_search_results(
-                    result,
-                    destination=args.get("destination_code", ""),
-                    check_in=args.get("check_in", ""),
-                    check_out=args.get("check_out", ""),
-                )
-            except Exception as persist_err:
-                # Do not break user flow if persistence fails
-                print(f"Warning: failed to save hotel search results: {persist_err}")
-            # Fetch and persist images for found hotels and attach to rates (separate try so failures above don't block)
-            try:
-                hotel_codes = []
-                if isinstance(result, dict) and isinstance(result.get("results"), list):
-                    for h in result["results"]:
-                        if h.get("code") is not None:
-                            hotel_codes.append(h["code"])
-                if hotel_codes:
-                    images_resp = get_hotel_images_impl(hotel_codes)
-                    if not images_resp.get("error"):
-                        save_hotel_images(images_resp.get("hotels", {}), "databases/hotelbeds.sqlite", attach_to_rates=True)
-                    else:
-                        print(f"Warning: image fetch error: {images_resp.get('error')}")
-            except Exception as image_err:
-                print(f"Warning: failed to fetch/save hotel images: {image_err}")
             # Return hotel results as JSON for frontend templates; fall back to LLM on errors
             if isinstance(result, dict) and result.get("error"):
                 return llm_post_tool_response(user_message, tool_name, args, result)
