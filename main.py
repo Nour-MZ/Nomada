@@ -17,6 +17,7 @@ from map_servers.flight_server import (
     get_offer,
     request_order_change_offers,
     confirm_order_change,
+    tokenize_card,
 )
 from map_servers.hotelbeds_server import (
     search_hotels,
@@ -400,22 +401,34 @@ def _normalize_payment_source(src: Optional[Dict[str, Any]]) -> Optional[Dict[st
     cvc = src.get("cvc")
     holder = src.get("holder_name", "")
     if card_number and exp_month and exp_year and cvc:
-        digits_only = "".join(ch for ch in str(card_number) if ch.isdigit())
-        last4 = digits_only[-4:] if digits_only else "0000"
-        # Pseudo token; replace with real PSP tokenization in production
-        pseudo_token = f"card_tok_{last4}"
-        return {
-            "card_id": pseudo_token,
-            "exp_month": str(exp_month),
-            "exp_year": str(exp_year),
-            "holder_name": holder,
-            # do not forward PAN or CVC
-        }
+        tokenized = tokenize_card(
+            card_number=str(card_number),
+            exp_month=str(exp_month),
+            exp_year=str(exp_year),
+            cvc=str(cvc),
+            holder_name=holder,
+        )
+        if isinstance(tokenized, dict) and tokenized.get("card_id"):
+            return {"card_id": tokenized["card_id"], "exp_month": str(exp_month), "exp_year": str(exp_year), "holder_name": holder}
+        # If tokenization failed, return an error object so caller can surface it
+        return {"error": tokenized}
 
     # As a final fallback, if a card_id exists but lacks the prefix, add it
     if card_id:
         return {**{k: v for k, v in src.items() if k != "card_number" and k != "cvc"}, "card_id": f"card_{card_id}"}
     return None
+
+
+def _valid_duffel_card_id(card_id: str) -> bool:
+    """
+    Duffel card tokens typically look like card_XXXXXXXX... with alnum chars.
+    """
+    if not card_id or not isinstance(card_id, str):
+        return False
+    if not card_id.startswith("card_"):
+        return False
+    stripped = card_id[len("card_") :]
+    return stripped.isalnum() and len(stripped) >= 6
 
 
 def _normalize_rooms_for_booking(
@@ -1001,6 +1014,20 @@ def handle_user_message(user_message: str) -> str:
                 "mode": data.get("mode", "instant"),
                 "create_hold": data.get("create_hold", False),
             }
+            if isinstance(order_payload.get("payment_source"), dict) and order_payload["payment_source"].get("error"):
+                err = order_payload["payment_source"]["error"]
+                try:
+                    return json.dumps(err, indent=2)
+                except Exception:
+                    return str(err)
+            if (
+                order_payload["payment_type"] == "card"
+                and not _valid_duffel_card_id((order_payload["payment_source"] or {}).get("card_id", ""))
+            ):
+                return (
+                    "Card payments need a Duffel card token (card_id). "
+                    "Use balance/hold, or provide a Duffel-issued card_id/3DS token."
+                )
             # Dedup guard: avoid rebooking same offer id immediately
             from time import time
             now = time()

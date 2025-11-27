@@ -191,6 +191,63 @@ def search_flights_impl(
     # Return capped set to keep responses manageable
     return top_offers
 
+
+def tokenize_card_impl(
+    card_number: str,
+    exp_month: str,
+    exp_year: str,
+    cvc: str,
+    holder_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Tokenize card details via Duffel Payments to obtain a card_id.
+    NOTE: In production, collect card details securely (PCI) and never log PAN/CVC.
+    """
+    token = _get_duffel_token()
+    if not token:
+        return {"error": "Missing Duffel API token"}
+
+    url = DUFFEL_PARAMS.base_url + "/payments/payment_methods"
+    payload = {
+        "data": {
+            "type": "payment_method",
+            "card": {
+                "number": str(card_number),
+                "expiry_month": str(exp_month),
+                "expiry_year": str(exp_year),
+                "cvc": str(cvc),
+            },
+            "holder_name": holder_name or "",
+        }
+    }
+
+    resp = None
+    try:
+        resp = requests.post(url, headers=_duffel_headers(token), json=payload, timeout=30)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        error_payload: Any = {}
+        status_code = None
+        if resp is not None:
+            status_code = resp.status_code
+            try:
+                error_payload = resp.json()
+            except Exception:
+                error_payload = {"text": resp.text}
+        logger.error("Card tokenization failed: %s", e)
+        return {
+            "error": f"Card tokenization failed: {e}",
+            "status": status_code,
+            "response": error_payload,
+            "payload_sent": {**payload, "data": {**payload["data"], "card": "***redacted***"}},
+        }
+
+    data = resp.json().get("data", {})
+    card_id = data.get("id")
+    if not card_id:
+        return {"error": "Tokenization succeeded but card_id missing", "raw": data}
+    return {"card_id": card_id, "raw": data}
+
 def create_order_impl(
     offer_id: str,
     payment_type: str = "balance",
@@ -864,3 +921,4 @@ cancel_order = cancel_order_impl
 get_offer = get_offer_impl
 request_order_change_offers = request_order_change_offers_impl
 confirm_order_change = confirm_order_change_impl
+tokenize_card = tokenize_card_impl
