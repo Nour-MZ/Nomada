@@ -76,11 +76,13 @@ def chat(req: ChatRequest) -> ChatResponse:
     # Patch backend's conversation_history for this request
     backend.conversation_history[:] = history
 
-    reply = backend.handle_user_message(req.message)
-    
+    try:
+        reply = backend.handle_user_message(req.message)
+    except Exception as e:
+        reply = f"Backend error: {e}"
     # Persist updated history back into session store
     _sessions[req.session_id] = backend.conversation_history.copy()
-    print(backend.conversation_history[-1])
+    print(history)
     return ChatResponse(reply=reply)
 
 

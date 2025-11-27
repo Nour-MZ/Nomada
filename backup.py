@@ -60,7 +60,7 @@ def plan_trip_first(
         hotels_sorted = sorted(hotels, key=rate_val)
         best_hotel = hotels_sorted[0]
 
-    activities = plan_things_to_do(destination=destination, interests=interests)
+    # activities = plan_things_to_do(destination=destination, interests=interests)
 
     estimate = {}
     if best_flight and best_hotel:

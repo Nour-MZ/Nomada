@@ -197,6 +197,7 @@ def create_order_impl(
     passengers: Optional[List[Dict[str, Any]]] = None,
     mode: str = "instant",
     create_hold: bool = False,
+    payment_source: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a flight order using the Duffel API from the selected offer.
@@ -311,13 +312,15 @@ def create_order_impl(
 
     # Include payment information unless it's a hold order
     if order_type == "instant":
-        order_payload["data"]["payments"] = [
-            {
-                "type": payment_type,
-                "amount": total_amount,
-                "currency": total_currency,
-            }
-        ]
+        payment_body: Dict[str, Any] = {
+            "type": payment_type,
+            "amount": total_amount,
+            "currency": total_currency,
+        }
+        if payment_source and isinstance(payment_source, dict):
+            # Allow card/gateway details (e.g., token/payment_method_id) to pass through
+            payment_body.update(payment_source)
+        order_payload["data"]["payments"] = [payment_body]
 
     # Step 4: Create the order
     create_order_url = DUFFEL_PARAMS.base_url + DUFFEL_PARAMS.commands["create_order"]

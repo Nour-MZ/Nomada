@@ -104,6 +104,7 @@ def search_hotels_impl(
     max_rate: Optional[float] = None,
     keywords: Optional[List[str]] = None,
     categories: Optional[List[str]] = None,
+    currency: str = "USD",
 ) -> Dict[str, Any]:
     """
     Basic availability search using Hotelbeds TEST API. destination_code is a Hotelbeds destination code (e.g., "PMI" for Palma).
@@ -150,6 +151,7 @@ def search_hotels_impl(
         "occupancies": occupancies,
         "destination": {"code": dest_code},
         "filter": {"maxHotels": limit},
+        "currency": (currency or "USD").upper(),
     }
 
     # Optional filters supported by Hotelbeds availability
@@ -165,7 +167,8 @@ def search_hotels_impl(
     url = HOTELBEDS_PARAMS.base_url + HOTELBEDS_PARAMS.commands["availability"]
     resp = None
     try:
-        resp = requests.post(url, headers=headers, json=body, timeout=30)
+        params = {"currency": (currency or "USD").upper()}
+        resp = requests.post(url, headers=headers, json=body, params=params, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.error("Hotelbeds availability failed: %s", e)
@@ -188,7 +191,6 @@ def search_hotels_impl(
     hotels = data.get("hotels") if isinstance(data, dict) else []
     if not isinstance(hotels, list):
         hotels = []
-    print(data)
     hotels_out: List[Dict[str, Any]] = []
     for h in hotels[:limit]:
         if not isinstance(h, dict):
@@ -251,6 +253,14 @@ def search_hotels_impl(
                 "facilities": facility_names,
             }
         )
+
+    if not hotels_out:
+        return {
+            "error": "No hotels found for the provided destination/dates.",
+            "destination": destination_code,
+            "check_in": check_in,
+            "check_out": check_out,
+        }
 
     result = {"results": hotels_out}
 

@@ -3,8 +3,7 @@ from __future__ import annotations
 import os
 import smtplib
 from email.message import EmailMessage
-from typing import Any, Dict
-
+from typing import Any, Dict, Optional
 
 
 SMTP_HOST = os.environ.get("SMTP_HOST")
@@ -14,40 +13,53 @@ SMTP_PASS = os.environ.get("SMTP_PASS")
 SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 
 
-def send_booking_email( booking: Dict[str, Any]) -> None:
+def send_booking_email(booking: Dict[str, Any]) -> None:
+    """
+    Send a consolidated booking email that includes flight (and optionally hotel) details.
+    Requires SMTP_* environment variables to be set.
+    """
     if not (SMTP_HOST and SMTP_PORT and SMTP_USER and SMTP_PASS and SMTP_FROM):
         print("Email not sent: SMTP_* env vars not fully configured")
         return
 
-    order_id = booking.get("order_id", "")
-    ref = booking.get("booking_reference", "") or order_id
-    total = booking.get("total", "")
-    currency = booking.get("currency", "")
-    itinerary = booking.get("itinerary", [])
-    passengers = booking.get("passengers", [])
-    payment_required_by = booking.get("payment_required_by")
-    order_type = booking.get("order_type")
-    # Collect recipient emails: primary plus passenger emails
+    flight = booking.get("flight_order") or booking
+    hotel = booking.get("hotel_booking") or {}
+
+    order_id = flight.get("order_id", "")
+    ref = flight.get("booking_reference", "") or order_id
+    total = flight.get("total", "") or flight.get("total_net", "")
+    currency = flight.get("currency", "")
+    itinerary = flight.get("itinerary", [])
+    passengers = flight.get("passengers", [])
+    payment_required_by = flight.get("payment_required_by")
+    order_type = flight.get("order_type", "instant")
+
     recipients = set()
     if booking.get("email"):
         recipients.add(booking.get("email"))
+    if flight.get("email"):
+        recipients.add(flight.get("email"))
     for p in passengers:
         if p.get("email"):
             recipients.add(p["email"])
-    def fmt_dt(val):
+    if not recipients:
+        print("Email not sent: no recipient emails available in booking payload")
+        return
+
+    def fmt_dt(val: Optional[str]) -> str:
         return val or "N/A"
 
     lines = [
         "Thank you for booking with Nomada.",
         "",
-        "Booking Summary",
+        "Flight Summary",
         f" - Booking reference: {ref}",
         f" - Order ID: {order_id}",
         f" - Type: {order_type}",
-        f" - Total: {total} {currency}",
+        f" - Total: {total} {currency}".strip(),
         f" - Payment required by: {payment_required_by or 'N/A'}",
         "",
-        "Passenger(s):",
+        "Passengers:",
     ]
     for p in passengers:
         lines.append(
@@ -65,7 +77,7 @@ def send_booking_email( booking: Dict[str, Any]) -> None:
         dest = arr_seg.get("destination", {}) or {}
         carrier = dep_seg.get("marketing_carrier", {}) or {}
 
-        lines.append(f"Leg {idx}: {origin.get('iata_code') or origin.get('name')} → {dest.get('iata_code') or dest.get('name')}")
+        lines.append(f" Leg {idx}: {origin.get('iata_code') or origin.get('name')} -> {dest.get('iata_code') or dest.get('name')}")
         lines.append(f"  Departure: {fmt_dt(dep_seg.get('departing_at'))}")
         lines.append(f"  Arrival:   {fmt_dt(arr_seg.get('arriving_at'))}")
         lines.append(f"  Flight:    {carrier.get('name','')} {dep_seg.get('marketing_carrier_flight_number','')}")
@@ -76,12 +88,23 @@ def send_booking_email( booking: Dict[str, Any]) -> None:
             lines.append("  Baggage:  " + "; ".join([f"{b.get('quantity','')} {b.get('type','')}" for b in baggage]))
         lines.append("")
 
+    if hotel:
+        hotel_raw = hotel.get("raw") or {}
+        hotel_info = hotel_raw.get("hotel", {}) or hotel_raw.get("hotel_info", {}) or {}
+        lines.append("Hotel Summary:")
+        lines.append(f" - Reference: {hotel_raw.get('reference') or hotel.get('booking_reference') or ''}")
+        lines.append(f" - Name: {hotel_info.get('name') or hotel_raw.get('name') or ''}")
+        lines.append(f" - Destination: {hotel_info.get('destinationName') or hotel_info.get('destinationCode') or ''}")
+        lines.append(f" - Check-in: {hotel_info.get('checkIn') or hotel.get('check_in','')}")
+        lines.append(f" - Check-out: {hotel_info.get('checkOut') or hotel.get('check_out','')}")
+        lines.append(f" - Total: {hotel.get('total_net') or hotel_raw.get('totalNet') or ''} {hotel.get('currency') or hotel_raw.get('currency') or ''}".strip())
+
     body = "\n".join(lines)
 
     msg = EmailMessage()
-    msg["Subject"] = f"Your Nomada flight booking {ref or order_id}"
+    msg["Subject"] = f"Your Nomada booking {ref or order_id}"
     msg["From"] = SMTP_FROM
-    msg["To"] = ", ".join(recipients) if recipients else ""
+    msg["To"] = ", ".join(recipients)
     msg.set_content(body)
 
     try:
@@ -89,65 +112,6 @@ def send_booking_email( booking: Dict[str, Any]) -> None:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
-        print(f"Sent booking email to {recipients.email} for {ref}")
+        print(f"Sent booking email to {', '.join(recipients)} for {ref}")
     except Exception as e:
         print(f"Failed to send booking email: {e}")
-
-
-def _load_decisions() -> Dict[str, Any]:
-    """
-    Helper function to load existing user decisions from a local JSON file.
-    Returns an empty dictionary if no data is available or if JSON is invalid.
-    """
-    if os.path.exists(DECISIONS_FILE_PATH):
-        try:
-            with open(DECISIONS_FILE_PATH, "r") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            # If file is empty or invalid, return empty dict
-            return {}
-    return {}
-
-
-def _save_decisions(data: Dict[str, Any]) -> None:
-    """
-    Helper function to save user decisions to a local JSON file.
-    """
-    with open(DECISIONS_FILE_PATH, "w") as f:
-        json.dump(data, f, indent=4)
-
-
-
-
-def save_user_flight_decision(
-    offer_id: str,
-    origin: str,
-    destination: str,
-    departure_date: str,
-    return_date: Optional[str] = None,
-    cabin_class: str = "economy",
-    price: float = 0.0,
-    currency: str = "USD",
-) -> None:
-    """
-    Save the user's flight selection decision (like offer_id, origin, destination, etc.) to a local JSON file.
-    This function is wrapped as a tool for the LLM to call as needed.
-    """
-    decisions = _load_decisions()
-
-    # Store flight details under the user's flight decision
-    flight_decision = {
-        "offer_id": offer_id,
-        "origin": origin,
-        "destination": destination,
-        "departure_date": departure_date,
-        "return_date": return_date,
-        "cabin_class": cabin_class,
-        "price": price,
-        "currency": currency,
-    }
-
-    # Store flight decision with a unique identifier, you can change key based on user's session or other factors
-    decisions[offer_id] = flight_decision
-    print(f"Saving the decision: {flight_decision}")
-    _save_decisions(decisions)
