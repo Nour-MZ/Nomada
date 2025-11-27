@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Callable
-from datetime import datetime
+from typing import Any, Dict, Callable, List, Optional
+from datetime import datetime, date, timedelta
 import openai
 from agents import function_tool
-import smtplib
-from email.message import EmailMessage
 
 # Import the Duffel functions (these should already be written and available)
 from map_servers.flight_server import (
@@ -30,6 +28,8 @@ from map_servers.hotelbeds_store import save_hotel_search_results, save_hotel_im
 from map_servers.hotelbeds_server import get_hotel_images_impl
 from map_servers.flight_store import save_flight_choice, load_flight_choices, save_flight_search_results, load_latest_search_offers
 from map_servers.utils import send_booking_email
+from map_servers.hotelbeds_store import load_hotel_search
+from booking_store import save_booking, cancel_booking_record
 from booking_store import save_booking, cancel_booking_record
 
 # ----------------------------------------------------------------------
@@ -76,7 +76,7 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
             }
         },
         "generate_passenger_template": {
-            "description": "Use whenever a user chooses a flight number after getting the `recent flight offers:` message. Run before the create_order function",
+            "description": "Use whenever a user chooses a flight number after getting the `recent flight offers:` message and only after search_flights have been called. Run before the create_order function",
             "args": {
                 "selection": "integer (required) - 1-based index of the flight from the latest search results"
             }
@@ -145,6 +145,10 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
                 "check_out": "string (required) - check-out date YYYY-MM-DD.",
                 "rooms": "list (optional) - occupancy details, e.g., [{'adults':2,'children':0}] or with paxes.",
                 "limit": "integer (optional) - max hotels to return (default 5).",
+                "min_rate": "float (optional) - minimum rate to filter hotels.",
+                "max_rate": "float (optional) - maximum rate to filter hotels.",
+                "keywords": "list (optional) - keyword codes to filter hotels. you can extract this from prompt example (sea, mountain, city, etc.)",
+                "categories": "list (optional) - category codes to filter hotels.",
             },
         },
         "book_hotel": {
@@ -182,6 +186,32 @@ def _tool_schema() -> Dict[str, Dict[str, Any]]:
                 "db_path": "string (optional) - sqlite file path, default flight_choices.sqlite"
             },
         },
+        "plan_trip_first": {
+            "description": "Plan a full travel package with flights, hotels, and activities within a budget.",
+            "args": {
+                "origin": "string (required) - origin IATA code",
+                "destination": "string (required) - destination IATA code",
+                "departure_date": "string (required) - YYYY-MM-DD",
+                "return_date": "string (optional) - YYYY-MM-DD",
+                "budget": "float (required) - total trip budget",
+                "passengers": "integer or list (optional) - number of travelers or pax list",
+                "cabin_class": "string (optional) - flight cabin class",
+                "hotel_min_rate": "float (optional) - min hotel rate",
+                "hotel_max_rate": "float (optional) - max hotel rate",
+                "hotel_keywords": "list (optional) - hotel keyword codes",
+                "hotel_categories": "list (optional) - hotel category codes",
+                "interests": "list (optional) - activities interests (e.g., hiking, food)",
+            },
+        },
+        "plan_things_to_do": {
+            "description": "Suggest activities/things to do at a destination based on interests.",
+            "args": {
+                "destination": "string (required) - city or place",
+                "interests": "list (optional) - interests such as hiking, food, culture",
+                "days": "integer (optional) - length of stay",
+                "budget_per_day": "float (optional) - activity budget per day",
+            },
+        },
         
     }
 # Removed duplicate TOOL_FUNCTIONS definition
@@ -208,9 +238,12 @@ def generate_passenger_template(selection: int, db_path: str = "databases/flight
     """
     offers = load_latest_search_offers(db_path=db_path)
     if not offers:
-        return {"error": "No recent flight search found"}
+        return {"error": "No recent flight search found. Please run a flight search and choose a number."}
     if selection < 1 or selection > len(offers):
-        return {"error": f"Selection {selection} is out of range", "count": len(offers)}
+        return {
+            "error": f"Selection {selection} is out of range. Latest search has {len(offers)} offer(s).",
+            "count": len(offers),
+        }
     chosen = offers[selection - 1].get("raw") or {}
 
     # Trim to only the fields needed by the frontend template
@@ -231,6 +264,184 @@ def generate_passenger_template(selection: int, db_path: str = "databases/flight
     return {"passenger_template": passenger_template, "selection": selection}
 
 
+def plan_things_to_do(
+    destination: str,
+    interests: Optional[List[str]] = None,
+    days: Optional[int] = None,
+    budget_per_day: Optional[float] = None,
+) -> Dict[str, Any]:
+    suggestions: List[Dict[str, Any]] = []
+    interests = interests or ["food", "culture", "outdoors"]
+    base = [
+        {"name": "City walking tour", "type": "culture", "cost": "low", "notes": "Explore old town and landmarks"},
+        {"name": "Local food crawl", "type": "food", "cost": "medium", "notes": "Sample street food and markets"},
+        {"name": "Sunset viewpoint", "type": "outdoors", "cost": "low", "notes": "Easy hike or cable car"},
+        {"name": "Museum visit", "type": "culture", "cost": "medium", "notes": "Top-rated museum in the city"},
+    ]
+    for item in base:
+        if any(kw in item["type"] for kw in interests):
+            suggestions.append(item)
+    return {
+        "destination": destination,
+        "days": days,
+        "budget_per_day": budget_per_day,
+        "suggestions": suggestions,
+    }
+
+
+def plan_trip_first(
+    origin: str,
+    destination: str,
+    departure_date: str,
+    return_date: Optional[str] = None,
+    budget: Optional[float] = None,
+    passengers: Optional[Any] = None,
+    cabin_class: str = "economy",
+    hotel_min_rate: Optional[float] = None,
+    hotel_max_rate: Optional[float] = None,
+    hotel_keywords: Optional[List[str]] = None,
+    hotel_categories: Optional[List[str]] = None,
+    interests: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    def _unspecified(val: Optional[str]) -> bool:
+        if val is None:
+            return True
+        if isinstance(val, str):
+            return val.strip().lower() in {"any", "anywhere", "n/a", "none", ""}
+        return False
+    print("test")
+    missing = []
+    if _unspecified(origin):
+        missing.append("origin (IATA code)")
+    if _unspecified(destination):
+        missing.append("destination (IATA code)")
+    if _unspecified(departure_date):
+        missing.append("departure_date (YYYY-MM-DD)")
+    if budget is None:
+        missing.append("budget")
+    if missing:
+        numbered = "\n".join([f"{idx+1}. {field}" for idx, field in enumerate(missing)])
+        return {
+            "error": "Missing required fields",
+            "missing_fields": missing,
+            "prompt": "Please provide the following (you can say 'any' if no preference):\n" + numbered + "\nOptional: return_date, passengers, cabin_class, hotel_min_rate/max_rate, hotel_keywords/categories, interests."
+        }
+    print("test2")
+    def _parse_date(val: str) -> Optional[date]:
+        try:
+            return datetime.strptime(val, "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    dep = _parse_date(departure_date)
+    ret = _parse_date(return_date) if return_date else None
+    nights = (ret - dep).days if dep and ret else None
+
+    # Perform fresh searches to populate DB
+    try:
+        pax_list = None
+        if isinstance(passengers, int):
+            pax_list = [{"type": "adult"} for _ in range(max(1, passengers))]
+        elif isinstance(passengers, list):
+            pax_list = passengers
+        else:
+            pax_list = [{"type": "adult"}]
+
+        search_flights(
+            slices=[{"origin": origin.upper(), "destination": destination.upper(), "departure_date": departure_date}],
+            passengers=pax_list,
+            cabin_class=cabin_class,
+        )
+    except Exception as e:
+        print(f"plan_trip_first: flight search failed {e}")
+        print("Test3")
+
+    check_out= return_date if return_date else (dep + timedelta(days=3)).isoformat() if dep else departure_date,
+
+    try:
+        print(departure_date)
+        print(return_date if return_date else (dep + timedelta(days=3)).isoformat() if dep else departure_date)
+        print(destination.upper())
+        
+
+        hotelresults = search_hotels(
+            destination_code=destination.upper(),
+            check_in=departure_date,
+            check_out= check_out,
+            # rooms = [{"adults": 2, "children": 0}],
+            limit=5,
+        )
+        save_hotel_search_results(
+                    hotelresults,
+                    destination=destination.upper(),
+                    check_in=departure_date,
+                    check_out=check_out,
+                )
+        print("test5")
+    except Exception as e:
+        print(f"plan_trip_first: hotel search failed {e}")
+
+    flights = load_latest_search_offers(db_path="databases/flights.sqlite")
+    best_flight = None
+    if flights:
+        flights_sorted = sorted(flights, key=lambda x: x.get("raw", {}).get("total_amount", float("inf")))
+        best_flight = flights_sorted[0].get("raw")
+    if not best_flight:
+        return {
+            "error": "No flights found for the provided criteria. Try different dates or routes.",
+            "origin": origin,
+            "destination": destination,
+            "departure_date": departure_date,
+        }
+    print("Test4")
+    hotels = []
+    try:
+        loaded = load_hotel_search(db_path="databases/hotelbeds.sqlite")
+        hotels = loaded.get("hotels", []) if isinstance(loaded, dict) else []
+    except Exception:
+        hotels = []
+    best_hotel = None
+    if hotels:
+        def rate_val(h):
+            try:
+                return float(h.get("min_rate") or h.get("max_rate") or 0)
+            except Exception:
+                return float("inf")
+        hotels_sorted = sorted(hotels, key=rate_val)
+        best_hotel = hotels_sorted[0]
+    if not best_hotel:
+        return {
+            "error": "No hotels found for the provided destination/dates. Try adjusting destination or dates.",
+            "destination": destination,
+            "check_in": departure_date,
+            "check_out": ret.isoformat() if ret else departure_date,
+        }
+
+    activities = plan_things_to_do(destination=destination, interests=interests)
+
+    estimate = {}
+    if best_flight and best_hotel:
+        try:
+            flight_cost = float(best_flight.get("total_amount") or best_flight.get("price") or 0)
+            hotel_cost = float(best_hotel.get("min_rate") or best_hotel.get("max_rate") or 0)
+            total_est = flight_cost + (hotel_cost * nights if nights else hotel_cost)
+            estimate = {"total_estimated": total_est, "currency": best_hotel.get("currency") or "USD"}
+        except Exception:
+            pass
+
+    return {
+        "origin": origin,
+        "destination": destination,
+        "departure_date": departure_date,
+        "return_date": return_date,
+        "budget": budget,
+        "passengers": passengers,
+        "flight": best_flight,
+        "hotel": best_hotel,
+        "activities": activities,
+        "estimate": estimate,
+        "nights": nights,
+    }
 TOOL_FUNCTIONS = {
     "search_flights": search_flights,
     "generate_passenger_template": generate_passenger_template, 
@@ -247,7 +458,8 @@ TOOL_FUNCTIONS = {
     "cancel_booking": cancel_booking,
     "save_flight_choice": save_flight_choice,
     "load_flight_choices": load_flight_choices,
-     # set after definition
+    "plan_trip_first": plan_trip_first,  # set after definition
+    "plan_things_to_do": plan_things_to_do,  # set after definition
 }
 
 
@@ -266,7 +478,8 @@ def build_system_prompt() -> str:
         "You are a travel assistant that can call a set of tools (Duffel API functions).\n"
         "YOU ONLY ANSWER TRAVEL RELATED QUESTIONS!\n"
         "DONT ANSWER ANYTHING NOT TRAVEL/TOURSIM RELATED!\n"
-        "If the user provides a flight selection number, you MUST call generate_passenger_template with that number before creating any order.\n"
+        "If the user Say plan full trip/jounrye use the plan_trip_first tool\n"
+        "If the user uses search_flights tool then provides a flight selection number, you MUST call generate_passenger_template with that number before creating any order.\n"
         "Do not call create_order until you have collected passenger details via the passenger template.\n"
         "Tools available:\n"
         f"{tools_text}\n\n"
@@ -345,7 +558,7 @@ def llm_post_tool_response(
     Step 3: After calling the tool, ask the LLM to explain the result.
     """
     prompter = load_prompt_from_file(prompt_key, prompt_file)
-   
+    print(user_message, tool_name, args, result )
     if not prompter:
         raise ValueError(f"No prompt found with key '{prompt_key}' in {prompt_file}")
     
@@ -446,7 +659,7 @@ def handle_user_message(user_message: str) -> str:
     # Tool path
     tool_name = decision.get("tool")
     args = decision.get("args", {}) or {}
-
+    print(decision)
     if tool_name not in TOOL_FUNCTIONS:
         return f"I tried to call an unknown tool '{tool_name}'. Please refine your request."
 
@@ -460,9 +673,10 @@ def handle_user_message(user_message: str) -> str:
         if len(formatted_result) > max_chars:
             formatted_result = formatted_result[:max_chars] + "\n... [truncated]"
         conversation_history.append({"role": "assistant", "content": formatted_result})
-        
+        print(result)
         if tool_name == "search_hotels":
             # Persist hotel search results for later retrieval
+            print("hotel results", result)
             try:
                 save_hotel_search_results(
                     result,
@@ -488,6 +702,21 @@ def handle_user_message(user_message: str) -> str:
                         print(f"Warning: image fetch error: {images_resp.get('error')}")
             except Exception as image_err:
                 print(f"Warning: failed to fetch/save hotel images: {image_err}")
+            # Return hotel results as JSON for frontend templates; fall back to LLM on errors
+            if isinstance(result, dict) and result.get("error"):
+                return llm_post_tool_response(user_message, tool_name, args, result)
+            try:
+                loaded = load_hotel_search(db_path="databases/hotelbeds.sqlite")
+                hotels = loaded.get("hotels", []) if isinstance(loaded, dict) else []
+            except Exception:
+                hotels = result.get("results", []) if isinstance(result, dict) else []
+            booking_hint = (
+                "To book a hotel, provide holder {name, surname}, rooms [{rateKey, paxes:[{roomId, type:'AD'/'CH', name, surname, age}]}], "
+                "client_reference, and optional remark."
+            )
+            conversation_history.append({"role": "assistant", "content": booking_hint})
+            print(hotels)
+            return json.dumps({"hotels": hotels}, indent=2)
         if tool_name == "search_flights":
             # Return raw flight offer JSON so the caller (e.g., frontend) can display all offers,
             # including those saved to the database, without truncation.
@@ -507,14 +736,29 @@ def handle_user_message(user_message: str) -> str:
                 return json.dumps(result, indent=2)
             except Exception:
                 return llm_post_tool_response(user_message, tool_name, args, result)
-                
         if tool_name =="generate_passenger_template":
             # Return the passenger template directly to the user
             passenger_template = result.get("passenger_template")
             if passenger_template:
                 return json.dumps(passenger_template, indent=2)
-            else:
-                return f"Error generating passenger template: {result.get('error', 'unknown error')}"
+            return result.get("error", "No passenger template available. Please rerun flight search and select a valid number.")
+        if tool_name == "plan_trip_first":
+            if isinstance(result, dict) and result.get("missing_fields"):
+                return llm_post_tool_response(user_message, tool_name, args, result, prompt_key="ask_for_missing_fields")
+            if isinstance(result, dict) and result.get("error"):
+                return llm_post_tool_response(user_message, tool_name, args, result, prompt_key="explain_decision")
+            try:
+                return json.dumps(result, indent=2)
+            except Exception:
+                return str(result)
+        # if tool_name == "plan_trip_first":
+        #     if isinstance(result, dict) and result.get("missing_fields"):
+        #         return llm_post_tool_response(user_message, tool_name, args, result)
+        #     else:
+        #         try:
+        #             return json.dumps(result, indent=2)
+        #         except Exception:
+        #             return str(result)
     except TypeError as e:
         return f"There was an error calling tool '{tool_name}' with arguments {args}: {e}"
     except Exception as e:

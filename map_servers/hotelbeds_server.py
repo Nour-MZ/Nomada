@@ -99,12 +99,17 @@ def search_hotels_impl(
     check_out: str,
     rooms: Optional[List[Dict[str, Any]]] = None,
     limit: int = 5,
+    min_rate: Optional[float] = None,
+    max_rate: Optional[float] = None,
+    keywords: Optional[List[str]] = None,
+    categories: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Basic availability search using Hotelbeds TEST API. destination_code is a Hotelbeds destination code (e.g., "PMI" for Palma).
     rooms: list of {"adults": int, "children": int, "paxes": [{"type": "AD"/"CH", "age": int}, ...]}
     Note: Hotelbeds test environment only has a subset of destinations (e.g., PMI, BCN, LON).
     """
+    
     headers = _hotelbeds_headers()
     if not headers:
         return {"error": "Missing HOTELBEDS_API_KEY or HOTELBEDS_SECRET"}
@@ -113,13 +118,7 @@ def search_hotels_impl(
     occ = rooms or [{"adults": 2, "children": 0}]
 
     dest_code = destination_code.upper().strip()
-    # allowed = _allowed_destinations()
-    # if allowed and dest_code not in allowed:
-    #     return {
-    #         "error": f"Destination '{dest_code}' not available in Hotelbeds TEST environment",
-    #         "hint": f"Use one of: {', '.join(allowed)} or set HOTELBEDS_TEST_DESTS to override.",
-    #     }
-
+   
     occupancies: List[Dict[str, Any]] = []
     for idx, o in enumerate(occ, start=1):
         # Normalize to dict
@@ -152,6 +151,16 @@ def search_hotels_impl(
         "filter": {"maxHotels": limit},
     }
 
+    # Optional filters supported by Hotelbeds availability
+    if min_rate is not None:
+        body["filter"]["minRate"] = float(min_rate)
+    if max_rate is not None:
+        body["filter"]["maxRate"] = float(max_rate)
+    if keywords:
+        body["keywords"] = [{"code": k} for k in keywords if k]
+    if categories:
+        body["filter"]["hotelCategory"] = categories
+
     url = HOTELBEDS_PARAMS.base_url + HOTELBEDS_PARAMS.commands["availability"]
     resp = None
     try:
@@ -178,7 +187,7 @@ def search_hotels_impl(
     hotels = data.get("hotels") if isinstance(data, dict) else []
     if not isinstance(hotels, list):
         hotels = []
-
+    print(data)
     hotels_out: List[Dict[str, Any]] = []
     for h in hotels[:limit]:
         if not isinstance(h, dict):
@@ -195,6 +204,30 @@ def search_hotels_impl(
         address = h.get("address")
         if isinstance(address, dict):
             address = address.get("content")
+        description = (h.get("description") or {}).get("content")
+        coords = h.get("coordinates") or {}
+        lat = coords.get("latitude")
+        lng = coords.get("longitude")
+        keywords_raw = h.get("keywords") or []
+        keywords: List[str] = []
+        if isinstance(keywords_raw, list):
+            for kw in keywords_raw:
+                if isinstance(kw, dict):
+                    content = kw.get("content")
+                    if isinstance(content, dict) and content.get("description"):
+                        keywords.append(content["description"])
+                    elif isinstance(content, str):
+                        keywords.append(content)
+                elif isinstance(kw, str):
+                    keywords.append(kw)
+        facilities = h.get("facilities") if isinstance(h.get("facilities"), list) else []
+        facility_names: List[str] = []
+        for f in facilities:
+            if isinstance(f, dict):
+                if f.get("facilityName"):
+                    facility_names.append(f["facilityName"])
+                elif f.get("description"):
+                    facility_names.append(f["description"])
 
         hotels_out.append(
             {
@@ -207,6 +240,14 @@ def search_hotels_impl(
                 "destination": destination_name,
                 "address": address,
                 "rooms": h.get("rooms"),
+                "description": description,
+                "latitude": lat,
+                "longitude": lng,
+                "keywords": keywords,
+                "zone": h.get("zoneName"),
+                "category_code": h.get("categoryCode"),
+                "chain": h.get("chain"),
+                "facilities": facility_names,
             }
         )
     
