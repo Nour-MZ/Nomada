@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv
+.env
+_tmp_view.txt
+databases/*.sqlite
+databases/*.db
+node_modules
+*.log
