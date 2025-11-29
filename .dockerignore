@@ -8,3 +8,4 @@ databases/*.sqlite
 databases/*.db
 node_modules
 *.log
+*.mp4
